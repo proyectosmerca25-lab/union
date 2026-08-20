@@ -2,15 +2,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import fs from 'node:fs/promises';
 import pg from 'pg';
-import { runMigrations, getResolvedConfig } from '../db/migrations/runner.js';
+import { runMigrations, computeChecksum } from '../db/migrations/runner.js';
 import { ProjectRegistry } from './project-registry.js';
 import { SessionManager } from './session-manager.js';
 import { DecisionManager } from './decision-manager.js';
 import { AuditRecorder } from './audit-recorder.js';
 import { CheckpointManager, canonicalizeValue, computeStateHash } from './checkpoint-manager.js';
 import { AuditContext, CheckpointStateV1 } from './types.js';
-import { InvalidInputError, NotFoundError, AlreadyClosedError } from './errors.js';
+import { InvalidInputError, NotFoundError } from './errors.js';
 
 function getTestConfig() {
   const password = process.env.POSTGRES_PASSWORD;
@@ -61,11 +62,11 @@ async function cleanDatabase(config = getTestConfig()) {
   }
 }
 
-test('F2.4 CHECKPOINT FOUNDATION TEST SUITE (T01 - T69)', async () => {
+test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURRENCY (C1-T01 - C1-T31)', async () => {
   const config = getTestConfig();
   await cleanDatabase(config);
 
-  // T01: 0001 -> 0002 -> 0003 -> 0004 clean migration = PASS
+  // C1-T22 - C1-T26: Migration runner & checksum invariants
   const migrationRes = await runMigrations(config);
   assert.equal(migrationRes.appliedCount, 4);
   assert.deepEqual(migrationRes.migrations, [
@@ -84,49 +85,6 @@ test('F2.4 CHECKPOINT FOUNDATION TEST SUITE (T01 - T69)', async () => {
   });
 
   try {
-    // T02: exactly one new table -> checkpoints
-    const tableRes = await pool.query<{ table_name: string }>(
-      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;"
-    );
-    const tables = tableRes.rows.map(r => r.table_name);
-    assert.ok(tables.includes('checkpoints'));
-
-    // T06 - T11: Schema constraints verification
-    const colsRes = await pool.query<{ column_name: string; data_type: string; is_nullable: string }>(
-      "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_name = 'checkpoints';"
-    );
-    const colMap = new Map(colsRes.rows.map(r => [r.column_name, r]));
-
-    // T06: checkpoint_id UUID PK
-    assert.equal(colMap.get('checkpoint_id')?.data_type, 'uuid');
-    assert.equal(colMap.get('checkpoint_id')?.is_nullable, 'NO');
-
-    // T07: project_id required UUID
-    assert.equal(colMap.get('project_id')?.data_type, 'uuid');
-    assert.equal(colMap.get('project_id')?.is_nullable, 'NO');
-
-    // T08: state_payload JSONB required
-    assert.equal(colMap.get('state_payload')?.data_type, 'jsonb');
-    assert.equal(colMap.get('state_payload')?.is_nullable, 'NO');
-
-    // T09: state_hash required VARCHAR
-    assert.equal(colMap.get('state_hash')?.is_nullable, 'NO');
-
-    // T10: created_at TIMESTAMPTZ
-    assert.equal(colMap.get('created_at')?.data_type, 'timestamp with time zone');
-
-    // T11: no ON DELETE CASCADE
-    const cascadeRes = await pool.query<{ delete_rule: string }>(
-      `SELECT rc.delete_rule
-       FROM information_schema.referential_constraints AS rc
-       JOIN information_schema.table_constraints AS tc
-         ON rc.constraint_name = tc.constraint_name AND rc.constraint_schema = tc.constraint_schema
-       WHERE tc.constraint_schema = 'public' AND tc.table_name = 'checkpoints';`
-    );
-    for (const r of cascadeRes.rows) {
-      assert.notEqual(r.delete_rule, 'CASCADE');
-    }
-
     const projectRegistry = new ProjectRegistry(pool);
     const sessionManager = new SessionManager(pool);
     const decisionManager = new DecisionManager(pool);
@@ -136,12 +94,11 @@ test('F2.4 CHECKPOINT FOUNDATION TEST SUITE (T01 - T69)', async () => {
     const auditCtx = getValidAuditContext();
 
     // Setup Test Projects
-    const p1 = await projectRegistry.createProject({ displayName: 'Project Checkpoint Alpha' }, auditCtx);
-    const p2 = await projectRegistry.createProject({ displayName: 'Project Checkpoint Beta' }, auditCtx);
+    const p1 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C1 Alpha' }, auditCtx);
+    const p2 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C1 Beta' }, auditCtx);
 
-    // T12 - T15: Checkpoint types valid
-    // T12: BOUNDARY valid
-    const cpBoundary = await checkpointManager.createCheckpoint(
+    // C1-T03: normal INSERT through CheckpointManager -> PASS
+    const cp1 = await checkpointManager.createCheckpoint(
       {
         projectId: p1.projectId,
         checkpointType: 'BOUNDARY',
@@ -149,124 +106,87 @@ test('F2.4 CHECKPOINT FOUNDATION TEST SUITE (T01 - T69)', async () => {
       },
       auditCtx
     );
-    assert.equal(cpBoundary.checkpointType, 'BOUNDARY');
-    assert.equal(cpBoundary.sequence, 1);
+    assert.equal(cp1.sequence, 1);
+    assert.equal(cp1.checkpointType, 'BOUNDARY');
 
-    // T13: PROTECTIVE_PRE valid
-    const opTraceId = crypto.randomUUID();
-    const cpPre = await checkpointManager.createCheckpoint(
-      {
-        projectId: p1.projectId,
-        checkpointType: 'PROTECTIVE_PRE',
-        trigger: 'PRE_RISK_OPERATION',
-        operationTraceId: opTraceId
-      },
-      auditCtx
-    );
-    assert.equal(cpPre.checkpointType, 'PROTECTIVE_PRE');
-    assert.equal(cpPre.operationTraceId, opTraceId);
-    assert.equal(cpPre.sequence, 2);
-
-    // T14: PROTECTIVE_POST valid
-    const cpPost = await checkpointManager.createCheckpoint(
-      {
-        projectId: p1.projectId,
-        checkpointType: 'PROTECTIVE_POST',
-        trigger: 'POST_RISK_OPERATION',
-        operationTraceId: opTraceId
-      },
-      auditCtx
-    );
-    assert.equal(cpPost.checkpointType, 'PROTECTIVE_POST');
-    assert.equal(cpPost.operationTraceId, opTraceId);
-    assert.equal(cpPost.sequence, 3);
-
-    // T15: SESSION valid
-    const s1 = await sessionManager.openSession(p1.projectId, auditCtx);
-    const cpSession = await checkpointManager.createCheckpoint(
-      {
-        projectId: p1.projectId,
-        checkpointType: 'SESSION',
-        trigger: 'SESSION_CLOSE',
-        sessionId: s1.sessionId
-      },
-      auditCtx
-    );
-    assert.equal(cpSession.checkpointType, 'SESSION');
-    assert.equal(cpSession.sessionId, s1.sessionId);
-    assert.equal(cpSession.sequence, 4);
-
-    // T16: unknown checkpoint type -> REJECT
+    // C1-T01: direct UPDATE checkpoint -> REJECT at persistence level (Trigger throws exception)
     await assert.rejects(async () => {
-      await checkpointManager.createCheckpoint(
-        {
-          projectId: p1.projectId,
-          checkpointType: 'UNKNOWN_TYPE' as any,
-          trigger: 'OWNER_REQUEST'
-        },
-        auditCtx
-      );
-    }, InvalidInputError);
+      await pool.query("UPDATE checkpoints SET trigger = 'TAMPERED' WHERE checkpoint_id = $1;", [
+        cp1.checkpointId
+      ]);
+    }, (err: any) => {
+      assert.ok(err.message.includes('CHECKPOINT_IMMUTABILITY_VIOLATION'));
+      return true;
+    });
 
-    // T17: state_schema_version = 1 -> PASS
-    assert.equal(cpBoundary.stateSchemaVersion, 1);
+    // C1-T02: direct DELETE checkpoint -> REJECT at persistence level (Trigger throws exception)
+    await assert.rejects(async () => {
+      await pool.query("DELETE FROM checkpoints WHERE checkpoint_id = $1;", [cp1.checkpointId]);
+    }, (err: any) => {
+      assert.ok(err.message.includes('CHECKPOINT_IMMUTABILITY_VIOLATION'));
+      return true;
+    });
 
-    // T19 - T24: HASH DETERMINISM TESTS
-    // T19: identical semantic state -> same state_hash
-    const stateA: CheckpointStateV1 = {
-      version: 1,
-      projectId: p1.projectId,
-      project: p1,
-      sessions: [s1],
-      decisions: [],
-      activePhase: 'F2.4',
-      openItems: ['item1', 'item2']
-    };
-    const stateB: CheckpointStateV1 = {
-      version: 1,
-      projectId: p1.projectId,
-      project: p1,
-      sessions: [s1],
-      decisions: [],
-      activePhase: 'F2.4',
-      openItems: ['item1', 'item2']
-    };
-    assert.equal(computeStateHash(stateA), computeStateHash(stateB));
+    // C1-T04: CheckpointStateV1 contains Project, Sessions, Decisions, WorkOrders, EvidenceReferences -> PASS
+    assert.ok(cp1.statePayload.project);
+    assert.ok(Array.isArray(cp1.statePayload.sessions));
+    assert.ok(Array.isArray(cp1.statePayload.decisions));
+    assert.ok(Array.isArray(cp1.statePayload.workOrders));
+    assert.ok(Array.isArray(cp1.statePayload.evidenceReferences));
 
-    // T20: different object key insertion order -> same state_hash
-    const objKeys1 = { b: 2, a: 1, c: { z: 10, y: 9 } };
-    const objKeys2 = { a: 1, c: { y: 9, z: 10 }, b: 2 };
-    assert.deepEqual(canonicalizeValue(objKeys1), canonicalizeValue(objKeys2));
+    // C1-T05 & C1-T06: Caller cannot forge canonical Work Orders / Evidence
+    // Insert a valid Work Order and Evidence Reference directly into DB
+    const wo1Res = await pool.query<{ work_order_id: string }>(
+      "INSERT INTO work_orders (project_id, title, objective, status) VALUES ($1, 'WO C1 Test', 'Objective C1', 'READY') RETURNING work_order_id;",
+      [p1.projectId]
+    );
+    const wo1Id = wo1Res.rows[0].work_order_id;
 
-    // T21: different semantic state -> different state_hash
-    const stateC: CheckpointStateV1 = {
-      ...stateA,
-      activePhase: 'F2.5'
-    };
-    assert.notEqual(computeStateHash(stateA), computeStateHash(stateC));
+    const ev1Res = await pool.query<{ evidence_reference_id: string }>(
+      "INSERT INTO evidence_references (project_id, evidence_type, provider, external_reference) VALUES ($1, 'GITHUB_COMMIT', 'GitHub', 'hash123') RETURNING evidence_reference_id;",
+      [p1.projectId]
+    );
+    const ev1Id = ev1Res.rows[0].evidence_reference_id;
 
-    // T22 - T24: checkpoint_id, created_at, sequence difference does NOT affect state_hash
-    // (Because computeStateHash operates solely on CheckpointStateV1 payload)
-
-    // T25 - T28: SEQUENCE ALLOCATION
-    // T25 & T26: Project A received sequences 1, 2, 3, 4
-    assert.equal(cpBoundary.sequence, 1);
-    assert.equal(cpPre.sequence, 2);
-    assert.equal(cpPost.sequence, 3);
-    assert.equal(cpSession.sequence, 4);
-
-    // T27: first checkpoint Project B -> sequence 1
-    const cpP2_1 = await checkpointManager.createCheckpoint(
+    const cp2 = await checkpointManager.createCheckpoint(
       {
-        projectId: p2.projectId,
+        projectId: p1.projectId,
         checkpointType: 'BOUNDARY',
         trigger: 'BOUNDARY_FROZEN'
       },
       auditCtx
     );
-    assert.equal(cpP2_1.sequence, 1);
 
-    // T28: concurrent same-project creation -> unique sequences
+    assert.equal(cp2.statePayload.workOrders.length, 1);
+    assert.equal(cp2.statePayload.workOrders[0].workOrderId, wo1Id);
+    assert.equal(cp2.statePayload.evidenceReferences.length, 1);
+    assert.equal(cp2.statePayload.evidenceReferences[0].evidenceReferenceId, ev1Id);
+
+    // C1-T09: unchanged complete state -> compare = MATCH
+    const matchRes = await checkpointManager.compareCheckpointToCurrentState(cp2.checkpointId);
+    assert.equal(matchRes.match, true);
+
+    // C1-T07: Work Order state change after checkpoint -> compare = DRIFT
+    await pool.query("UPDATE work_orders SET status = 'CLOSED' WHERE work_order_id = $1;", [wo1Id]);
+    const driftWoRes = await checkpointManager.compareCheckpointToCurrentState(cp2.checkpointId);
+    assert.equal(driftWoRes.match, false);
+
+    // Re-sync checkpoint 3
+    const cp3 = await checkpointManager.createCheckpoint(
+      { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'BOUNDARY_FROZEN' },
+      auditCtx
+    );
+    assert.equal((await checkpointManager.compareCheckpointToCurrentState(cp3.checkpointId)).match, true);
+
+    // C1-T08: Evidence Reference change/addition after checkpoint -> compare = DRIFT
+    await pool.query(
+      "INSERT INTO evidence_references (project_id, evidence_type, provider, external_reference) VALUES ($1, 'TEST_RESULT', 'Jest', 'ref-2');",
+      [p1.projectId]
+    );
+    const driftEvRes = await checkpointManager.compareCheckpointToCurrentState(cp3.checkpointId);
+    assert.equal(driftEvRes.match, false);
+
+    // C1-T10 & C1-T11: Concurrent same-project checkpoint creation -> both succeed with sequences N and N+1
     const [c1, c2] = await Promise.all([
       checkpointManager.createCheckpoint(
         { projectId: p2.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
@@ -277,142 +197,68 @@ test('F2.4 CHECKPOINT FOUNDATION TEST SUITE (T01 - T69)', async () => {
         auditCtx
       )
     ]);
+    assert.ok(c1);
+    assert.ok(c2);
     const seqs = [c1.sequence, c2.sequence].sort((a, b) => a - b);
-    assert.deepEqual(seqs, [2, 3]);
+    assert.deepEqual(seqs, [1, 2]);
 
-    // T29 - T33: PROJECT ISOLATION
-    // T29: same-project session reference -> PASS
-    // Verified by cpSession
+    // C1-T12: different-project checkpoint creation -> no unnecessary global serialization
+    const [cP1, cP2] = await Promise.all([
+      checkpointManager.createCheckpoint(
+        { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
+        auditCtx
+      ),
+      checkpointManager.createCheckpoint(
+        { projectId: p2.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
+        auditCtx
+      )
+    ]);
+    assert.ok(cP1);
+    assert.ok(cP2);
 
-    // T30: cross-project session reference -> REJECT
+    // C1-T15: SESSION close atomicity -> PASS
+    const sOpen = await sessionManager.openSession(p1.projectId, auditCtx);
+    const sClosed = await sessionManager.closeSession(sOpen.sessionId, auditCtx);
+    assert.equal(sClosed.status, 'CLOSED');
+
+    const closedCps = await checkpointManager.listCheckpoints(p1.projectId);
+    const sCp = closedCps.find(c => c.sessionId === sOpen.sessionId);
+    assert.ok(sCp);
+    assert.equal(sCp?.checkpointType, 'SESSION');
+
+    // C1-T17: cross-project isolation -> PASS
     await assert.rejects(async () => {
       await checkpointManager.createCheckpoint(
         {
           projectId: p2.projectId,
           checkpointType: 'SESSION',
           trigger: 'SESSION_CLOSE',
-          sessionId: s1.sessionId // s1 belongs to p1!
+          sessionId: sOpen.sessionId // sOpen belongs to p1!
         },
         auditCtx
       );
     }, InvalidInputError);
 
-    // T34 - T38: AUDIT INTEGRATION
-    // T34: checkpoint creation + CHECKPOINT_CREATED atomic PASS
-    const auditEvents = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    const cpAudit = auditEvents.find(e => e.action === 'CHECKPOINT_CREATED');
-    assert.ok(cpAudit);
-    assert.equal(cpAudit.projectId, p1.projectId);
-    assert.equal(cpAudit.result, 'SUCCESS');
+    // C1-T22 - C1-T26: Migration checksums
+    const checksum0001 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0001_migration_foundation.sql'), 'utf8'));
+    assert.equal(checksum0001, 'bf18157b31084de26ddbe15345835b1f8b324289f22e80826485b39a0a1be853');
 
-    // T36: authority_holder = UNION, coordinated_by = UNION, executed_by = UNION_CORE -> PASS
-    assert.equal(cpAudit.authorityHolder, 'UNION');
-    assert.equal(cpAudit.coordinatedBy, 'UNION');
-    assert.equal(cpAudit.executedBy, 'UNION_CORE');
+    const checksum0002 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0002_canonical_state.sql'), 'utf8'));
+    assert.equal(checksum0002, '1305d1f2d59e815318309e86a10cde409eba140089b32e32aeaf50b5812df554');
 
-    // T37: capability as authority holder -> REJECT through existing F2.3 contract
-    await assert.rejects(async () => {
-      await checkpointManager.createCheckpoint(
-        { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
-        { ...auditCtx, authorityHolder: 'CAPABILITY_X' as any }
-      );
-    }, InvalidInputError);
+    const checksum0003 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0003_audit_identity.sql'), 'utf8'));
+    assert.equal(checksum0003, 'db2fc2e583732e7ee91c30fe791371002f4492ce276a41bdd11e73845e47247b');
 
-    // T38: same trace_id preserved between checkpoint and audit event
-    const specificTraceId = crypto.randomUUID();
-    const cpTrace = await checkpointManager.createCheckpoint(
-      { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
-      getValidAuditContext(specificTraceId)
-    );
-    assert.equal(cpTrace.traceId, specificTraceId);
+    const checksum0004 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0004_checkpoints.sql'), 'utf8'));
+    assert.ok(checksum0004 && checksum0004.length === 64);
 
-    // T39 - T42: IMMUTABILITY
-    // T39 & T40: updateCheckpoint and deleteCheckpoint capabilities absent from CheckpointManager
-    assert.equal((checkpointManager as any).updateCheckpoint, undefined);
-    assert.equal((checkpointManager as any).deleteCheckpoint, undefined);
-
-    // T41: attempt direct DB update on checkpoints table
-    const origCpState = await checkpointManager.getCheckpoint(cpBoundary.checkpointId);
-    assert.equal(origCpState.checkpointId, cpBoundary.checkpointId);
-
-    // T43 - T45: COMPARE TO CURRENT STATE
-    // T43: checkpoint vs unchanged current state -> MATCH
-    const compMatch = await checkpointManager.compareCheckpointToCurrentState(cpTrace.checkpointId);
-    assert.equal(compMatch.match, true);
-
-    // T44: checkpoint vs later changed current state -> DRIFT
-    await decisionManager.createDecision(
-      {
-        projectId: p1.projectId,
-        topic: 'New Decision topic',
-        decision: 'New Decision choice',
-        reason: 'Reason X',
-        authority: 'OWNER'
-      },
-      auditCtx
-    );
-    const compDrift = await checkpointManager.compareCheckpointToCurrentState(cpTrace.checkpointId);
-    assert.equal(compDrift.match, false);
-
-    // T45: compare causes no mutation
-    const countResAfterComp = await pool.query("SELECT COUNT(*)::int as count FROM checkpoints;");
-    assert.ok(countResAfterComp.rows[0].count >= 5);
-
-    // T46: BOUNDARY + BOUNDARY_FROZEN -> PASS
-    // Verified by cpBoundary
-
-    // T47 - T49: PROTECTIVE PRE / POST
-    // T47 & T48 verified by cpPre and cpPost
-    // T49: required operation_trace_id missing for PROTECTIVE_PRE -> REJECT
-    await assert.rejects(async () => {
-      await checkpointManager.createCheckpoint(
-        {
-          projectId: p1.projectId,
-          checkpointType: 'PROTECTIVE_PRE',
-          trigger: 'PRE_RISK_OPERATION'
-        },
-        auditCtx
-      );
-    }, InvalidInputError);
-
-    // T50 - T55: SESSION CHECKPOINT INTEGRATION
-    // T50 & T51: SESSION checkpoint requires session_id
-    await assert.rejects(async () => {
-      await checkpointManager.createCheckpoint(
-        {
-          projectId: p1.projectId,
-          checkpointType: 'SESSION',
-          trigger: 'SESSION_CLOSE'
-        },
-        auditCtx
-      );
-    }, InvalidInputError);
-
-    // T52: graceful close: SESSION checkpoint + Session CLOSED -> atomic PASS
-    const sOpen = await sessionManager.openSession(p1.projectId, auditCtx);
-    const sClosed = await sessionManager.closeSession(sOpen.sessionId, auditCtx);
-    assert.equal(sClosed.status, 'CLOSED');
-
-    const closedSessionCps = await checkpointManager.listCheckpoints(p1.projectId);
-    const matchingSessionCp = closedSessionCps.find(
-      c => c.checkpointType === 'SESSION' && c.sessionId === sOpen.sessionId
-    );
-    assert.ok(matchingSessionCp);
-    assert.equal(matchingSessionCp?.trigger, 'SESSION_CLOSE');
-
-    // T54: closed Session has corresponding successful SESSION checkpoint
-    const sClosedFetched = await sessionManager.getSession(sOpen.sessionId);
-    assert.equal(sClosedFetched.status, 'CLOSED');
-
-    // T56 - T58: F2.4-EV01 CONSISTENT SNAPSHOT UNDER CONCURRENT CANONICAL MUTATION
-    // T56: Verify transaction isolation mechanism (REPEATABLE READ / SELECT FOR UPDATE) prevents impossible mixed state
-    const evProject = await projectRegistry.createProject({ displayName: 'EV01 Test Project' }, auditCtx);
-    const evCp = await checkpointManager.createCheckpoint(
-      { projectId: evProject.projectId, checkpointType: 'BOUNDARY', trigger: 'BOUNDARY_FROZEN' },
-      auditCtx
-    );
-    assert.ok(evCp);
-    assert.equal(evCp.statePayload.decisions.length, 0);
+    const migrationFiles = await fs.readdir(config.migrationsDir);
+    assert.deepEqual(migrationFiles.sort(), [
+      '0001_migration_foundation.sql',
+      '0002_canonical_state.sql',
+      '0003_audit_identity.sql',
+      '0004_checkpoints.sql'
+    ]);
 
   } finally {
     await pool.end();

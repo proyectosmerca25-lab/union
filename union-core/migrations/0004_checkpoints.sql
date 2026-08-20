@@ -1,5 +1,6 @@
 -- UNIÓN F2.4 Migration — Checkpoint Foundation
 -- Creates checkpoints table with composite candidate and foreign key constraints for project isolation.
+-- Includes persistence-level immutability trigger preventing UPDATE and DELETE.
 
 CREATE TABLE IF NOT EXISTS checkpoints (
   checkpoint_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -34,3 +35,22 @@ CREATE TABLE IF NOT EXISTS checkpoints (
     checkpoint_type IN ('BOUNDARY', 'PROTECTIVE_PRE', 'PROTECTIVE_POST', 'SESSION')
   )
 );
+
+-- Persistence-Level Checkpoint Immutability Trigger
+CREATE OR REPLACE FUNCTION enforce_checkpoint_immutability()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' THEN
+    RAISE EXCEPTION 'CHECKPOINT_IMMUTABILITY_VIOLATION: Sealed checkpoints cannot be UPDATEd';
+  ELSIF TG_OP = 'DELETE' THEN
+    RAISE EXCEPTION 'CHECKPOINT_IMMUTABILITY_VIOLATION: Sealed checkpoints cannot be DELETEd';
+  END IF;
+  RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS trg_checkpoints_immutability ON checkpoints;
+CREATE TRIGGER trg_checkpoints_immutability
+BEFORE UPDATE OR DELETE ON checkpoints
+FOR EACH ROW
+EXECUTE FUNCTION enforce_checkpoint_immutability();

@@ -45,6 +45,33 @@ export interface Decision {
   readonly decidedAt: Date | null;
 }
 
+export interface WorkOrderState {
+  readonly workOrderId: string;
+  readonly projectId: string;
+  readonly sessionId: string | null;
+  readonly parentWorkOrderId: string | null;
+  readonly title: string;
+  readonly objective: string;
+  readonly status: string;
+  readonly createdAt: Date;
+  readonly updatedAt: Date;
+  readonly completedAt: Date | null;
+}
+
+export interface EvidenceReferenceState {
+  readonly evidenceReferenceId: string;
+  readonly projectId: string;
+  readonly sessionId: string | null;
+  readonly decisionId: string | null;
+  readonly workOrderId: string | null;
+  readonly evidenceType: string;
+  readonly provider: string;
+  readonly externalReference: string;
+  readonly checksum: string | null;
+  readonly metadata: Record<string, unknown> | null;
+  readonly createdAt: Date;
+}
+
 export interface CreateProjectInput {
   readonly displayName: string;
 }
@@ -174,6 +201,8 @@ export interface CheckpointStateV1 {
   readonly project: Project;
   readonly sessions: Session[];
   readonly decisions: Decision[];
+  readonly workOrders: WorkOrderState[];
+  readonly evidenceReferences: EvidenceReferenceState[];
   readonly activePhase?: string | null;
   readonly activeBlock?: string | null;
   readonly lastCompletedBoundary?: string | null;

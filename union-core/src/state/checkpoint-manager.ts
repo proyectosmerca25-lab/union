@@ -14,8 +14,10 @@ import {
   CheckpointTrigger,
   CreateCheckpointInput,
   Decision,
+  EvidenceReferenceState,
   Project,
-  Session
+  Session,
+  WorkOrderState
 } from './types.js';
 
 export function canonicalizeValue(val: unknown): unknown {
@@ -88,6 +90,130 @@ export class CheckpointManager {
     this.auditRecorder = new AuditRecorder(client);
   }
 
+  /**
+   * Internal shared state-builder that constructs a complete canonical CheckpointStateV1
+   * for a project. Uses SELECT FOR UPDATE on the project row during writes to guarantee
+   * consistent snapshot creation and project-scoped sequence serialization.
+   */
+  private async buildCanonicalProjectState(
+    projectId: string,
+    txClient: pg.ClientBase,
+    contextInput?: Partial<CreateCheckpointInput>,
+    forUpdate = true
+  ): Promise<CheckpointStateV1> {
+    // 1. Fetch Project row (with optional FOR UPDATE lock)
+    const query = forUpdate
+      ? 'SELECT * FROM projects WHERE project_id = $1 FOR UPDATE;'
+      : 'SELECT * FROM projects WHERE project_id = $1;';
+    const projRes = await txClient.query(query, [projectId]);
+    if (projRes.rows.length === 0) {
+      throw new NotFoundError(`Project not found: '${projectId}'`);
+    }
+    const projectRow = projRes.rows[0];
+    const project: Project = {
+      projectId: projectRow.project_id,
+      displayName: projectRow.display_name,
+      status: projectRow.status,
+      createdAt: new Date(projectRow.created_at),
+      updatedAt: new Date(projectRow.updated_at)
+    };
+
+    // 2. Query all Sessions belonging to Project (ordered by session_id)
+    const sessionsRes = await txClient.query(
+      'SELECT * FROM sessions WHERE project_id = $1 ORDER BY session_id ASC;',
+      [projectId]
+    );
+    const sessions: Session[] = sessionsRes.rows.map(r => ({
+      sessionId: r.session_id,
+      projectId: r.project_id,
+      status: r.status,
+      startedAt: new Date(r.started_at),
+      closedAt: r.closed_at ? new Date(r.closed_at) : null,
+      createdAt: new Date(r.created_at),
+      updatedAt: new Date(r.updated_at)
+    }));
+
+    // 3. Query all Decisions belonging to Project (ordered by decision_id)
+    const decisionsRes = await txClient.query(
+      'SELECT * FROM decisions WHERE project_id = $1 ORDER BY decision_id ASC;',
+      [projectId]
+    );
+    const decisions: Decision[] = decisionsRes.rows.map(r => ({
+      decisionId: r.decision_id,
+      projectId: r.project_id,
+      sessionId: r.session_id || null,
+      topic: r.topic,
+      decision: r.decision,
+      status: r.status,
+      reason: r.reason || null,
+      alternativesConsidered: r.alternatives_considered ? JSON.parse(r.alternatives_considered) : null,
+      authority: r.authority,
+      supersedesDecisionId: r.supersedes_decision_id || null,
+      reopenCondition: r.reopen_condition || null,
+      createdAt: new Date(r.created_at),
+      updatedAt: new Date(r.updated_at),
+      decidedAt: r.decided_at ? new Date(r.decided_at) : null
+    }));
+
+    // 4. Query all Work Orders belonging to Project (ordered by work_order_id)
+    const workOrdersRes = await txClient.query(
+      'SELECT * FROM work_orders WHERE project_id = $1 ORDER BY work_order_id ASC;',
+      [projectId]
+    );
+    const workOrders: WorkOrderState[] = workOrdersRes.rows.map(r => ({
+      workOrderId: r.work_order_id,
+      projectId: r.project_id,
+      sessionId: r.session_id || null,
+      parentWorkOrderId: r.parent_work_order_id || null,
+      title: r.title,
+      objective: r.objective,
+      status: r.status,
+      createdAt: new Date(r.created_at),
+      updatedAt: new Date(r.updated_at),
+      completedAt: r.completed_at ? new Date(r.completed_at) : null
+    }));
+
+    // 5. Query all Evidence References belonging to Project (ordered by evidence_reference_id)
+    const evidenceRes = await txClient.query(
+      'SELECT * FROM evidence_references WHERE project_id = $1 ORDER BY evidence_reference_id ASC;',
+      [projectId]
+    );
+    const evidenceReferences: EvidenceReferenceState[] = evidenceRes.rows.map(r => ({
+      evidenceReferenceId: r.evidence_reference_id,
+      projectId: r.project_id,
+      sessionId: r.session_id || null,
+      decisionId: r.decision_id || null,
+      workOrderId: r.work_order_id || null,
+      evidenceType: r.evidence_type,
+      provider: r.provider,
+      externalReference: r.external_reference,
+      checksum: r.checksum || null,
+      metadata: r.metadata ? (typeof r.metadata === 'string' ? JSON.parse(r.metadata) : r.metadata) : null,
+      createdAt: new Date(r.created_at)
+    }));
+
+    return {
+      version: 1,
+      projectId,
+      project,
+      sessions,
+      decisions,
+      workOrders,
+      evidenceReferences,
+      activePhase: contextInput?.activePhase ?? null,
+      activeBlock: contextInput?.activeBlock ?? null,
+      lastCompletedBoundary: contextInput?.lastCompletedBoundary ?? null,
+      openItems: contextInput?.openItems ? [...contextInput.openItems].sort() : [],
+      deferredItems: contextInput?.deferredItems ? [...contextInput.deferredItems].sort() : [],
+      blockers: contextInput?.blockers ? [...contextInput.blockers].sort() : [],
+      repositoryState: contextInput?.repositoryState ?? null,
+      productionState: contextInput?.productionState ?? null,
+      lastConfirmedAction: contextInput?.lastConfirmedAction ?? null,
+      pendingWork: contextInput?.pendingWork ? [...contextInput.pendingWork] : [],
+      nextRecommendedAction: contextInput?.nextRecommendedAction ?? null
+    };
+  }
+
   async createCheckpoint(
     input: CreateCheckpointInput,
     auditContext: AuditContext,
@@ -147,21 +273,10 @@ export class CheckpointManager {
         await txClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ;');
       }
 
-      // 1. Verify Project exists
-      const projRes = await txClient.query('SELECT * FROM projects WHERE project_id = $1;', [projectId]);
-      if (projRes.rows.length === 0) {
-        throw new NotFoundError(`Project not found: '${projectId}'`);
-      }
-      const projectRow = projRes.rows[0];
-      const project: Project = {
-        projectId: projectRow.project_id,
-        displayName: projectRow.display_name,
-        status: projectRow.status,
-        createdAt: new Date(projectRow.created_at),
-        updatedAt: new Date(projectRow.updated_at)
-      };
+      // 1. Build canonical state (locks project row with SELECT FOR UPDATE)
+      const statePayload = await this.buildCanonicalProjectState(projectId, txClient, input, true);
 
-      // 2. Validate session if provided
+      // 2. Validate session if provided (same-project ownership check)
       if (input.sessionId) {
         const sessRes = await txClient.query(
           'SELECT * FROM sessions WHERE session_id = $1 AND project_id = $2;',
@@ -174,74 +289,17 @@ export class CheckpointManager {
         }
       }
 
-      // 3. Query all Sessions belonging to Project
-      const sessionsRes = await txClient.query(
-        'SELECT * FROM sessions WHERE project_id = $1 ORDER BY session_id ASC;',
-        [projectId]
-      );
-      const sessions: Session[] = sessionsRes.rows.map(r => ({
-        sessionId: r.session_id,
-        projectId: r.project_id,
-        status: r.status,
-        startedAt: new Date(r.started_at),
-        closedAt: r.closed_at ? new Date(r.closed_at) : null,
-        createdAt: new Date(r.created_at),
-        updatedAt: new Date(r.updated_at)
-      }));
-
-      // 4. Query all Decisions belonging to Project
-      const decisionsRes = await txClient.query(
-        'SELECT * FROM decisions WHERE project_id = $1 ORDER BY decision_id ASC;',
-        [projectId]
-      );
-      const decisions: Decision[] = decisionsRes.rows.map(r => ({
-        decisionId: r.decision_id,
-        projectId: r.project_id,
-        sessionId: r.session_id || null,
-        topic: r.topic,
-        decision: r.decision,
-        status: r.status,
-        reason: r.reason || null,
-        alternativesConsidered: r.alternatives_considered ? JSON.parse(r.alternatives_considered) : null,
-        authority: r.authority,
-        supersedesDecisionId: r.supersedes_decision_id || null,
-        reopenCondition: r.reopen_condition || null,
-        createdAt: new Date(r.created_at),
-        updatedAt: new Date(r.updated_at),
-        decidedAt: r.decided_at ? new Date(r.decided_at) : null
-      }));
-
-      // 5. Concurrency-safe Sequence Allocation
+      // 3. Concurrency-safe Sequence Allocation (serialized by project row FOR UPDATE lock)
       const seqRes = await txClient.query(
         'SELECT COALESCE(MAX(sequence), 0) + 1 AS next_seq FROM checkpoints WHERE project_id = $1;',
         [projectId]
       );
       const sequence = Number(seqRes.rows[0].next_seq);
 
-      // 6. Build CheckpointStateV1
-      const statePayload: CheckpointStateV1 = {
-        version: 1,
-        projectId,
-        project,
-        sessions,
-        decisions,
-        activePhase: input.activePhase ?? null,
-        activeBlock: input.activeBlock ?? null,
-        lastCompletedBoundary: input.lastCompletedBoundary ?? null,
-        openItems: input.openItems ? [...input.openItems].sort() : [],
-        deferredItems: input.deferredItems ? [...input.deferredItems].sort() : [],
-        blockers: input.blockers ? [...input.blockers].sort() : [],
-        repositoryState: input.repositoryState ?? null,
-        productionState: input.productionState ?? null,
-        lastConfirmedAction: input.lastConfirmedAction ?? null,
-        pendingWork: input.pendingWork ? [...input.pendingWork] : [],
-        nextRecommendedAction: input.nextRecommendedAction ?? null
-      };
-
-      // 7. Compute state hash
+      // 4. Compute state hash
       const stateHash = computeStateHash(statePayload);
 
-      // 8. Insert checkpoint row
+      // 5. Insert checkpoint row
       const insRes = await txClient.query(
         `INSERT INTO checkpoints (
            project_id, checkpoint_type, sequence, state_schema_version,
@@ -271,7 +329,7 @@ export class CheckpointManager {
         ]
       );
 
-      // 9. Transactional Audit Event
+      // 6. Transactional Audit Event
       await this.auditRecorder.recordAuditEvent(
         {
           ...auditContext,
@@ -360,79 +418,24 @@ export class CheckpointManager {
     const cp = await this.getCheckpoint(checkpointId);
     const projectId = cp.projectId;
 
-    // Fetch current project state
-    const projRes = await this.client.query('SELECT * FROM projects WHERE project_id = $1;', [projectId]);
-    if (projRes.rows.length === 0) {
-      throw new NotFoundError(`Project not found: '${projectId}'`);
+    const isPool = 'totalCount' in this.client || 'idleCount' in this.client;
+    const txClient = isPool ? await (this.client as pg.Pool).connect() : (this.client as pg.Client);
+
+    try {
+      if (isPool) await txClient.query('BEGIN READ ONLY;');
+
+      const currentStatePayload = await this.buildCanonicalProjectState(projectId, txClient, cp.statePayload, false);
+      const currentHash = computeStateHash(currentStatePayload);
+
+      if (isPool) await txClient.query('COMMIT;');
+
+      return {
+        match: cp.stateHash === currentHash,
+        checkpointHash: cp.stateHash,
+        currentHash
+      };
+    } finally {
+      if (isPool) (txClient as pg.PoolClient).release();
     }
-    const projectRow = projRes.rows[0];
-    const project: Project = {
-      projectId: projectRow.project_id,
-      displayName: projectRow.display_name,
-      status: projectRow.status,
-      createdAt: new Date(projectRow.created_at),
-      updatedAt: new Date(projectRow.updated_at)
-    };
-
-    const sessionsRes = await this.client.query(
-      'SELECT * FROM sessions WHERE project_id = $1 ORDER BY session_id ASC;',
-      [projectId]
-    );
-    const sessions: Session[] = sessionsRes.rows.map(r => ({
-      sessionId: r.session_id,
-      projectId: r.project_id,
-      status: r.status,
-      startedAt: new Date(r.started_at),
-      closedAt: r.closed_at ? new Date(r.closed_at) : null,
-      createdAt: new Date(r.created_at),
-      updatedAt: new Date(r.updated_at)
-    }));
-
-    const decisionsRes = await this.client.query(
-      'SELECT * FROM decisions WHERE project_id = $1 ORDER BY decision_id ASC;',
-      [projectId]
-    );
-    const decisions: Decision[] = decisionsRes.rows.map(r => ({
-      decisionId: r.decision_id,
-      projectId: r.project_id,
-      sessionId: r.session_id || null,
-      topic: r.topic,
-      decision: r.decision,
-      status: r.status,
-      reason: r.reason || null,
-      alternativesConsidered: r.alternatives_considered ? JSON.parse(r.alternatives_considered) : null,
-      authority: r.authority,
-      supersedesDecisionId: r.supersedes_decision_id || null,
-      reopenCondition: r.reopen_condition || null,
-      createdAt: new Date(r.created_at),
-      updatedAt: new Date(r.updated_at),
-      decidedAt: r.decided_at ? new Date(r.decided_at) : null
-    }));
-
-    const currentStatePayload: CheckpointStateV1 = {
-      version: 1,
-      projectId,
-      project,
-      sessions,
-      decisions,
-      activePhase: cp.statePayload.activePhase ?? null,
-      activeBlock: cp.statePayload.activeBlock ?? null,
-      lastCompletedBoundary: cp.statePayload.lastCompletedBoundary ?? null,
-      openItems: cp.statePayload.openItems ? [...cp.statePayload.openItems].sort() : [],
-      deferredItems: cp.statePayload.deferredItems ? [...cp.statePayload.deferredItems].sort() : [],
-      blockers: cp.statePayload.blockers ? [...cp.statePayload.blockers].sort() : [],
-      repositoryState: cp.statePayload.repositoryState ?? null,
-      productionState: cp.statePayload.productionState ?? null,
-      lastConfirmedAction: cp.statePayload.lastConfirmedAction ?? null,
-      pendingWork: cp.statePayload.pendingWork ? [...cp.statePayload.pendingWork] : [],
-      nextRecommendedAction: cp.statePayload.nextRecommendedAction ?? null
-    };
-
-    const currentHash = computeStateHash(currentStatePayload);
-    return {
-      match: cp.stateHash === currentHash,
-      checkpointHash: cp.stateHash,
-      currentHash
-    };
   }
 }
