@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "shared" },
+    { "path": "union-core" },
+    { "path": "union-web" }
+  ]
+}

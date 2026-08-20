@@ -4,16 +4,24 @@
   "private": true,
   "description": "UNIÓN — Private Multi-Project Governance & Coordination System Monorepo",
   "author": "Omar",
+  "type": "module",
   "engines": {
     "node": ">=24.0.0",
     "npm": ">=10.0.0"
   },
   "workspaces": [
+    "shared",
     "union-core",
-    "union-web",
-    "shared"
+    "union-web"
   ],
   "scripts": {
-    "test": "npm run test --workspaces"
+    "build": "tsc -b",
+    "typecheck": "tsc -b --noEmit",
+    "test": "npm run build && npm run test --workspaces",
+    "clean": "tsc -b --clean"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "typescript": "^5.7.3"
   }
 }

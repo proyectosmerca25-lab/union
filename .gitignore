@@ -5,10 +5,11 @@ yarn-debug.log*
 yarn-error.log*
 lerna-debug.log*
 
-# Build outputs
+# Build outputs and TS build cache
 dist/
 build/
 out/
+*.tsbuildinfo
 
 # Environment and secrets
 .env
