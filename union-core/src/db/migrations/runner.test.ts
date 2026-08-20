@@ -51,9 +51,9 @@ test('TEST F: env=local & databaseEnv=local migration behavior remains PASS', as
   await cleanDatabase(config);
 
   const result = await runMigrations(config);
-  assert.equal(result.appliedCount, 1);
+  assert.equal(result.appliedCount, 2);
   assert.equal(result.alreadyAppliedCount, 0);
-  assert.deepEqual(result.migrations, ['0001_migration_foundation.sql']);
+  assert.deepEqual(result.migrations, ['0001_migration_foundation.sql', '0002_canonical_state.sql']);
 });
 
 test('TEST 2: Second execution is idempotent', async () => {
@@ -61,7 +61,7 @@ test('TEST 2: Second execution is idempotent', async () => {
 
   const secondRun = await runMigrations(config);
   assert.equal(secondRun.appliedCount, 0);
-  assert.equal(secondRun.alreadyAppliedCount, 1);
+  assert.equal(secondRun.alreadyAppliedCount, 2);
   assert.deepEqual(secondRun.migrations, []);
 });
 
@@ -78,11 +78,13 @@ test('TEST 3: Migration history contains correct migration identity', async () =
 
   try {
     const res = await client.query<{ migration_id: string; filename: string }>(
-      'SELECT migration_id, filename FROM union_schema_migrations;'
+      'SELECT migration_id, filename FROM union_schema_migrations ORDER BY migration_id;'
     );
-    assert.equal(res.rows.length, 1);
+    assert.equal(res.rows.length, 2);
     assert.equal(res.rows[0].migration_id, '0001');
     assert.equal(res.rows[0].filename, '0001_migration_foundation.sql');
+    assert.equal(res.rows[1].migration_id, '0002');
+    assert.equal(res.rows[1].filename, '0002_canonical_state.sql');
   } finally {
     await client.end();
   }
@@ -182,10 +184,15 @@ test('TEST 7: Failed migration inside transaction does NOT become recorded', asy
       path.join(config.migrationsDir, '0001_migration_foundation.sql'),
       'utf8'
     );
+    const sql0002 = await fs.readFile(
+      path.join(config.migrationsDir, '0002_canonical_state.sql'),
+      'utf8'
+    );
     await fs.writeFile(path.join(tempMigrationsDir, '0001_migration_foundation.sql'), sql0001, 'utf8');
+    await fs.writeFile(path.join(tempMigrationsDir, '0002_canonical_state.sql'), sql0002, 'utf8');
 
     await fs.writeFile(
-      path.join(tempMigrationsDir, '0002_broken_sql.sql'),
+      path.join(tempMigrationsDir, '0003_broken_sql.sql'),
       'INVALID SQL SYNTAX HERE;',
       'utf8'
     );
@@ -207,7 +214,7 @@ test('TEST 7: Failed migration inside transaction does NOT become recorded', asy
 
     try {
       const res = await client.query<{ migration_id: string }>(
-        "SELECT migration_id FROM union_schema_migrations WHERE migration_id = '0002';"
+        "SELECT migration_id FROM union_schema_migrations WHERE migration_id = '0003';"
       );
       assert.equal(res.rows.length, 0);
     } finally {
@@ -258,8 +265,8 @@ test('TEST 9: Concurrent runner execution cannot silently double-apply', async (
   ]);
 
   assert.equal(res1.appliedCount + res2.appliedCount, 0);
-  assert.equal(res1.alreadyAppliedCount, 1);
-  assert.equal(res2.alreadyAppliedCount, 1);
+  assert.equal(res1.alreadyAppliedCount, 2);
+  assert.equal(res2.alreadyAppliedCount, 2);
   assert.equal(ADVISORY_LOCK_ID, 8641001);
 });
 
