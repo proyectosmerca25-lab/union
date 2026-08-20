@@ -16,6 +16,7 @@
     "@union/shared": "*"
   },
   "scripts": {
+    "start": "node dist/index.js",
     "build": "tsc -b",
     "typecheck": "tsc -b --noEmit",
     "test": "node --test dist/**/*.test.js",

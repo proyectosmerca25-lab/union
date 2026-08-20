@@ -1,4 +1,16 @@
+import url from 'node:url';
+import { bootstrapCore, CoreRuntimeHandle, CoreRuntimeIdentity } from './app/bootstrap.js';
+import { CoreLifecycle, InvalidLifecycleTransitionError, LifecycleState } from './app/lifecycle.js';
 import { getSystemBaseline, SystemContract } from '@union/shared';
+
+export {
+  CoreLifecycle,
+  InvalidLifecycleTransitionError,
+  LifecycleState,
+  bootstrapCore,
+  CoreRuntimeHandle,
+  CoreRuntimeIdentity
+};
 
 export interface CoreStatus {
   service: string;
@@ -12,4 +24,23 @@ export function getCoreStatus(): CoreStatus {
     initialized: true,
     baseline: getSystemBaseline()
   };
+}
+
+// Standalone process execution entry point check
+const isMainModule = (): boolean => {
+  if (!process.argv[1]) return false;
+  try {
+    const mainPath = url.fileURLToPath(import.meta.url);
+    return process.argv[1] === mainPath;
+  } catch {
+    return false;
+  }
+};
+
+if (isMainModule()) {
+  void (async () => {
+    console.log('[CORE] Starting @union/core runtime skeleton...');
+    const handle = await bootstrapCore({ attachSignalListeners: true });
+    console.log(`[CORE] Runtime started. Service: ${handle.identity.service}, Version: ${handle.identity.version}, Lifecycle: ${handle.lifecycle.getState()}`);
+  })();
 }
