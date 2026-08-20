@@ -105,7 +105,12 @@ test('TEST 15 & TEST 16 & TEST 17 & TEST 18: Local Foundation E2E Validation', a
 });
 
 test('E2E MISMATCH PATH: Mismatch fails closed before DB execution', async () => {
-  const password = process.env.POSTGRES_PASSWORD ?? 'dummy_value_for_mismatch_test';
+  const password = process.env.POSTGRES_PASSWORD;
+  if (!password || password.trim() === '') {
+    throw new MissingDatabaseConfigurationError(
+      'Missing required database configuration: POSTGRES_PASSWORD is required and cannot be empty'
+    );
+  }
   const databaseUrl = `postgresql://union_app:${password}@localhost:5432/union`;
 
   // Config validation fails before DB execution
