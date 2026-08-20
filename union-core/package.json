@@ -18,7 +18,7 @@
   "scripts": {
     "start": "node dist/index.js",
     "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit",
+    "typecheck": "tsc -b",
     "test": "node --test dist/**/*.test.js",
     "clean": "tsc -b --clean"
   }

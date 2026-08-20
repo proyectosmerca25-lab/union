@@ -13,3 +13,5 @@ export function getWebStatus(): WebStatus {
     systemVersion: UNION_SYSTEM_VERSION
   };
 }
+
+export { App } from './App.js';

@@ -15,8 +15,8 @@
     "union-web"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "typecheck": "tsc -b --noEmit",
+    "build": "tsc -b && npm run build --workspace=@union/web",
+    "typecheck": "tsc -b",
     "test": "npm run build && npm run test --workspaces",
     "clean": "tsc -b --clean"
   },
