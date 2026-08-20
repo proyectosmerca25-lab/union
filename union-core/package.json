@@ -1,0 +1,11 @@
+{
+  "name": "@union/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UNIÓN Core — Governance, State, Session & Orchestration Engine",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "echo \"@union/core build placeholder\"",
+    "test": "echo \"@union/core test placeholder\" && exit 0"
+  }
+}

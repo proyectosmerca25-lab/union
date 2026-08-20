@@ -1,0 +1,19 @@
+{
+  "name": "union",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UNIÓN — Private Multi-Project Governance & Coordination System Monorepo",
+  "author": "Omar",
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=10.0.0"
+  },
+  "workspaces": [
+    "union-core",
+    "union-web",
+    "shared"
+  ],
+  "scripts": {
+    "test": "npm run test --workspaces"
+  }
+}

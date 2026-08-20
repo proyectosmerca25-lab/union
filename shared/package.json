@@ -1,0 +1,11 @@
+{
+  "name": "@union/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UNIÓN Shared Contracts, Types & Interfaces",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "echo \"@union/shared build placeholder\"",
+    "test": "echo \"@union/shared test placeholder\" && exit 0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "@union/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "UNIÓN Web — Dashboard & Control Interface",
+  "scripts": {
+    "build": "echo \"@union/web build placeholder\"",
+    "test": "echo \"@union/web test placeholder\" && exit 0"
+  }
+}
