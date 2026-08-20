@@ -1,6 +1,18 @@
 import url from 'node:url';
 import { bootstrapCore, CoreRuntimeHandle, CoreRuntimeIdentity } from './app/bootstrap.js';
 import { CoreLifecycle, InvalidLifecycleTransitionError, LifecycleState } from './app/lifecycle.js';
+import {
+  ChecksumMismatchError,
+  computeChecksum,
+  discoverMigrations,
+  DuplicateMigrationIdentityError,
+  getResolvedConfig,
+  MalformedMigrationIdentityError,
+  MigrationConfig,
+  MigrationResult,
+  MissingDatabaseConfigurationError,
+  runMigrations
+} from './db/migrations/runner.js';
 import { getSystemBaseline, SystemContract } from '@union/shared';
 
 export {
@@ -9,7 +21,17 @@ export {
   LifecycleState,
   bootstrapCore,
   CoreRuntimeHandle,
-  CoreRuntimeIdentity
+  CoreRuntimeIdentity,
+  runMigrations,
+  computeChecksum,
+  discoverMigrations,
+  getResolvedConfig,
+  MigrationConfig,
+  MigrationResult,
+  MissingDatabaseConfigurationError,
+  MalformedMigrationIdentityError,
+  DuplicateMigrationIdentityError,
+  ChecksumMismatchError
 };
 
 export interface CoreStatus {
