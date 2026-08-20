@@ -39,6 +39,7 @@ async function cleanDatabase(config = getTestConfig()) {
   });
   await client.connect();
   try {
+    await client.query('DROP TABLE IF EXISTS checkpoints CASCADE;');
     await client.query('DROP TABLE IF EXISTS audit_events CASCADE;');
     await client.query('DROP TABLE IF EXISTS evidence_references CASCADE;');
     await client.query('DROP TABLE IF EXISTS decision_work_orders CASCADE;');
@@ -56,16 +57,21 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
   const config = getTestConfig();
   await cleanDatabase(config);
 
-  // T01: 0001 -> 0002 -> 0003 clean migration = PASS
+  // T01: 0001 -> 0002 -> 0003 -> 0004 clean migration = PASS
   const firstRun = await runMigrations(config);
-  assert.equal(firstRun.appliedCount, 3);
+  assert.equal(firstRun.appliedCount, 4);
   assert.equal(firstRun.alreadyAppliedCount, 0);
-  assert.deepEqual(firstRun.migrations, ['0001_migration_foundation.sql', '0002_canonical_state.sql', '0003_audit_identity.sql']);
+  assert.deepEqual(firstRun.migrations, [
+    '0001_migration_foundation.sql',
+    '0002_canonical_state.sql',
+    '0003_audit_identity.sql',
+    '0004_checkpoints.sql'
+  ]);
 
   // T27: Second migration-runner execution = IDEMPOTENT / PASS
   const secondRun = await runMigrations(config);
   assert.equal(secondRun.appliedCount, 0);
-  assert.equal(secondRun.alreadyAppliedCount, 3);
+  assert.equal(secondRun.alreadyAppliedCount, 4);
 
   const client = new pg.Client({
     host: config.host,
@@ -77,13 +83,14 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
   await client.connect();
 
   try {
-    // T02 & T33: Exactly six new domain tables + union_schema_migrations
+    // T02 & T33: Exactly seven domain tables + union_schema_migrations
     const tableRes = await client.query<{ table_name: string }>(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;"
     );
     const tables = tableRes.rows.map(r => r.table_name);
     const expectedTables = [
       'audit_events',
+      'checkpoints',
       'decision_work_orders',
       'decisions',
       'evidence_references',
@@ -260,7 +267,7 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
     await assert.rejects(async () => {
       await client.query(
         "INSERT INTO decisions (project_id, session_id, topic, decision, status, reason, authority) VALUES ($1, $2, 'T', 'D', 'PROPOSED', 'R', 'A');",
-        [p1Id, s2Id] // s2 belongs to p2!
+        [p1Id, s2Id]
       );
     });
 
@@ -268,7 +275,7 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
     await assert.rejects(async () => {
       await client.query(
         "INSERT INTO work_orders (project_id, parent_work_order_id, title, objective, status) VALUES ($1, $2, 'Child WO', 'Obj', 'DRAFT');",
-        [p1Id, wo2Id] // wo2 belongs to p2!
+        [p1Id, wo2Id]
       );
     });
 
@@ -276,7 +283,7 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
     await assert.rejects(async () => {
       await client.query(
         "INSERT INTO decision_work_orders (decision_id, work_order_id, project_id) VALUES ($1, $2, $3);",
-        [d1Id, wo2Id, p1Id] // d1 belongs to p1, wo2 belongs to p2!
+        [d1Id, wo2Id, p1Id]
       );
     });
 
@@ -284,7 +291,7 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
     await assert.rejects(async () => {
       await client.query(
         "INSERT INTO evidence_references (project_id, session_id, evidence_type, provider, external_reference) VALUES ($1, $2, 'TEST_RESULT', 'Jest', 'ref-1');",
-        [p1Id, s2Id] // s2 belongs to p2!
+        [p1Id, s2Id]
       );
     });
 

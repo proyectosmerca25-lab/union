@@ -9,6 +9,7 @@ import {
 } from './errors.js';
 import { ProjectRegistry } from './project-registry.js';
 import { AuditRecorder } from './audit-recorder.js';
+import { CheckpointManager } from './checkpoint-manager.js';
 
 function mapRowToSession(row: any): Session {
   return {
@@ -159,6 +160,19 @@ export class SessionManager {
       if (session.status === 'CLOSED') {
         throw new AlreadyClosedError(`Session '${sessionId}' is already CLOSED`);
       }
+
+      // Create SESSION Checkpoint transactionally prior to session close
+      const checkpointManager = new CheckpointManager(txClient as any);
+      await checkpointManager.createCheckpoint(
+        {
+          projectId: session.projectId,
+          checkpointType: 'SESSION',
+          trigger: 'SESSION_CLOSE',
+          sessionId: session.sessionId
+        },
+        auditContext,
+        txClient
+      );
 
       const res = await txClient.query(
         `UPDATE sessions

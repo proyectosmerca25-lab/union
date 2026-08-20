@@ -54,6 +54,7 @@ async function cleanDatabase(config = getTestConfig()) {
   });
   await client.connect();
   try {
+    await client.query('DROP TABLE IF EXISTS checkpoints CASCADE;');
     await client.query('DROP TABLE IF EXISTS audit_events CASCADE;');
     await client.query('DROP TABLE IF EXISTS evidence_references CASCADE;');
     await client.query('DROP TABLE IF EXISTS decision_work_orders CASCADE;');
@@ -72,7 +73,7 @@ test('F2.3-C1 CORRECTIVE TEST MATRIX: FAIL-CLOSED AUTHORITY PROVENANCE (C1-T01 -
   await cleanDatabase(config);
 
   const migrationRes = await runMigrations(config);
-  assert.equal(migrationRes.appliedCount, 3);
+  assert.equal(migrationRes.appliedCount, 4);
 
   const client = new pg.Client({
     host: config.host,
@@ -485,7 +486,8 @@ test('F2.3-C1 CORRECTIVE TEST MATRIX: FAIL-CLOSED AUTHORITY PROVENANCE (C1-T01 -
     assert.deepEqual(migrationFiles.sort(), [
       '0001_migration_foundation.sql',
       '0002_canonical_state.sql',
-      '0003_audit_identity.sql'
+      '0003_audit_identity.sql',
+      '0004_checkpoints.sql'
     ]);
   } finally {
     await client.end();

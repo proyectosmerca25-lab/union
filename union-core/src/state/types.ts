@@ -109,7 +109,8 @@ export type AuditAction =
   | 'DECISION_FROZEN'
   | 'DECISION_REOPENED'
   | 'DECISION_REJECTED'
-  | 'DECISION_SUPERSEDED';
+  | 'DECISION_SUPERSEDED'
+  | 'CHECKPOINT_CREATED';
 
 export type AuditResult = 'SUCCESS' | 'DENIED' | 'FAILED';
 
@@ -150,4 +151,78 @@ export interface RecordAuditEventInput extends AuditContext {
   readonly sessionId?: string | null;
   readonly decisionId?: string | null;
   readonly workOrderId?: string | null;
+}
+
+export type CheckpointType =
+  | 'BOUNDARY'
+  | 'PROTECTIVE_PRE'
+  | 'PROTECTIVE_POST'
+  | 'SESSION';
+
+export type CheckpointTrigger =
+  | 'BOUNDARY_FROZEN'
+  | 'PRE_RISK_OPERATION'
+  | 'POST_RISK_OPERATION'
+  | 'SESSION_CLOSE'
+  | 'PROJECT_PAUSE'
+  | 'PROJECT_COMPLETION'
+  | 'OWNER_REQUEST';
+
+export interface CheckpointStateV1 {
+  readonly version: 1;
+  readonly projectId: string;
+  readonly project: Project;
+  readonly sessions: Session[];
+  readonly decisions: Decision[];
+  readonly activePhase?: string | null;
+  readonly activeBlock?: string | null;
+  readonly lastCompletedBoundary?: string | null;
+  readonly openItems?: string[];
+  readonly deferredItems?: string[];
+  readonly blockers?: string[];
+  readonly repositoryState?: Record<string, unknown> | null;
+  readonly productionState?: Record<string, unknown> | null;
+  readonly lastConfirmedAction?: string | null;
+  readonly pendingWork?: string[];
+  readonly nextRecommendedAction?: string | null;
+}
+
+export interface Checkpoint {
+  readonly checkpointId: string;
+  readonly projectId: string;
+  readonly checkpointType: CheckpointType;
+  readonly sequence: number;
+  readonly stateSchemaVersion: number;
+  readonly statePayload: CheckpointStateV1;
+  readonly stateHash: string;
+  readonly sessionId: string | null;
+  readonly trigger: CheckpointTrigger;
+  readonly operationTraceId: string | null;
+  readonly actor: AuditActor;
+  readonly authorityHolder: AuditAuthorityHolder;
+  readonly authorityBasis: AuditAuthorityBasis;
+  readonly authorityReference: string | null;
+  readonly coordinatedBy: AuditCoordinatedBy;
+  readonly executedBy: AuditExecutedBy;
+  readonly traceId: string;
+  readonly createdAt: Date;
+}
+
+export interface CreateCheckpointInput {
+  readonly projectId: string;
+  readonly checkpointType: CheckpointType;
+  readonly trigger: CheckpointTrigger;
+  readonly sessionId?: string | null;
+  readonly operationTraceId?: string | null;
+  readonly activePhase?: string | null;
+  readonly activeBlock?: string | null;
+  readonly lastCompletedBoundary?: string | null;
+  readonly openItems?: string[];
+  readonly deferredItems?: string[];
+  readonly blockers?: string[];
+  readonly repositoryState?: Record<string, unknown> | null;
+  readonly productionState?: Record<string, unknown> | null;
+  readonly lastConfirmedAction?: string | null;
+  readonly pendingWork?: string[];
+  readonly nextRecommendedAction?: string | null;
 }

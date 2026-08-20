@@ -50,6 +50,7 @@ async function cleanDatabase(config = getTestConfig()) {
   });
   await client.connect();
   try {
+    await client.query('DROP TABLE IF EXISTS checkpoints CASCADE;');
     await client.query('DROP TABLE IF EXISTS audit_events CASCADE;');
     await client.query('DROP TABLE IF EXISTS evidence_references CASCADE;');
     await client.query('DROP TABLE IF EXISTS decision_work_orders CASCADE;');
@@ -507,7 +508,12 @@ test('F2.2 CANONICAL STATE OPERATIONS TEST MATRIX (T01 - T54)', async () => {
     assert.equal(expectedChecksum, '1305d1f2d59e815318309e86a10cde409eba140089b32e32aeaf50b5812df554');
 
     const migrationFiles = await fs.readdir(config.migrationsDir);
-    assert.deepEqual(migrationFiles.sort(), ['0001_migration_foundation.sql', '0002_canonical_state.sql', '0003_audit_identity.sql']);
+    assert.deepEqual(migrationFiles.sort(), [
+      '0001_migration_foundation.sql',
+      '0002_canonical_state.sql',
+      '0003_audit_identity.sql',
+      '0004_checkpoints.sql'
+    ]);
 
   } finally {
     await client.end();
