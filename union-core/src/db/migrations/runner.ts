@@ -72,10 +72,6 @@ export interface MigrationResult {
   migrations: string[];
 }
 
-export function discoverMigrations(migrationsDir: string): Promise<DiscoveredMigration[]> {
-  return discoverMigrationsImpl(migrationsDir);
-}
-
 export function computeChecksum(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
@@ -181,7 +177,7 @@ export function getResolvedConfig(
   };
 }
 
-async function discoverMigrationsImpl(migrationsDir: string): Promise<DiscoveredMigration[]> {
+export async function discoverMigrations(migrationsDir: string): Promise<DiscoveredMigration[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(migrationsDir);
@@ -194,17 +190,17 @@ async function discoverMigrationsImpl(migrationsDir: string): Promise<Discovered
   const seenIds = new Set<string>();
 
   for (const filename of sqlFiles) {
-    const match = filename.match(/^(\d{4})_.*\.sql$/);
+    const match = /^(\d{4})_[\w-]+\.sql$/.exec(filename);
     if (!match) {
       throw new MalformedMigrationIdentityError(
-        `Invalid migration filename format '${filename}'. Expected format: NNNN_description.sql (e.g. 0001_foundation.sql)`
+        `Invalid migration filename format '${filename}'. Expected '0001_name.sql'`
       );
     }
 
     const id = match[1];
     if (seenIds.has(id)) {
       throw new DuplicateMigrationIdentityError(
-        `Duplicate migration ID '${id}' found in file '${filename}'`
+        `Duplicate migration ID '${id}' detected in file '${filename}'`
       );
     }
     seenIds.add(id);

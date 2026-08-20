@@ -478,3 +478,51 @@ test('TEST G (DATABASE_URL): No DATABASE_URL or password appears in error messag
   }
 });
 
+// STRICT MIGRATION DISCOVERY TESTS
+
+test('STRICT MIGRATION FILENAME CONTRACT: Permissive or malformed filenames fail closed', async () => {
+  const tempDir = await fs.mkdtemp(path.join(process.cwd(), 'temp_strict_mig_'));
+
+  try {
+    const invalidFilenames = [
+      '0001_bad space.sql',
+      '0001_bad!char.sql',
+      '0001_bad.extra.sql',
+      'invalid_prefix.sql'
+    ];
+
+    for (const badName of invalidFilenames) {
+      const filePath = path.join(tempDir, badName);
+      await fs.writeFile(filePath, 'SELECT 1;', 'utf8');
+
+      await assert.rejects(
+        async () => {
+          await discoverMigrations(tempDir);
+        },
+        (err: unknown) => {
+          assert.ok(err instanceof MalformedMigrationIdentityError);
+          assert.ok((err as MalformedMigrationIdentityError).message.includes("Expected '0001_name.sql'"));
+          return true;
+        }
+      );
+
+      await fs.unlink(filePath);
+    }
+
+    // Valid strict filenames must pass
+    const validFilenames = ['0001_foundation.sql', '0002_user-accounts.sql', '0003_app_data.sql'];
+    for (const validName of validFilenames) {
+      await fs.writeFile(path.join(tempDir, validName), 'SELECT 1;', 'utf8');
+    }
+
+    const discovered = await discoverMigrations(tempDir);
+    assert.equal(discovered.length, 3);
+    assert.equal(discovered[0].id, '0001');
+    assert.equal(discovered[1].id, '0002');
+    assert.equal(discovered[2].id, '0003');
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+
