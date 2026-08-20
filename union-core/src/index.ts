@@ -23,6 +23,11 @@ import {
   runMigrations
 } from './db/migrations/runner.js';
 import {
+  createHttpServer,
+  HttpServerHandle,
+  HttpServerOptions
+} from './http/server.js';
+import {
   createLogger,
   FormattedLogEvent,
   Logger,
@@ -67,7 +72,10 @@ export {
   SafeSerializedError,
   sanitizeString,
   sanitizeContext,
-  sanitizeError
+  sanitizeError,
+  createHttpServer,
+  HttpServerHandle,
+  HttpServerOptions
 };
 
 export interface CoreStatus {

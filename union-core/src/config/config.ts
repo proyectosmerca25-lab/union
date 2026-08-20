@@ -3,6 +3,7 @@ export type UnionEnv = 'local' | 'test' | 'production';
 export interface UnionConfig {
   readonly env: UnionEnv;
   readonly databaseUrl: string;
+  readonly port: number;
 }
 
 export interface SafeConfigSummary {
@@ -47,9 +48,24 @@ export function loadConfig(envSource?: Record<string, string | undefined>): Unio
   }
   const databaseUrl = rawDbUrl.trim();
 
+  const rawPort = envMap.PORT;
+  if (!rawPort || rawPort.trim() === '') {
+    throw new MissingConfigurationError('Missing required configuration: PORT is required');
+  }
+  const trimmedPort = rawPort.trim();
+  if (!/^\d+$/.test(trimmedPort)) {
+    throw new InvalidConfigurationError('Invalid configuration: PORT must be a valid integer');
+  }
+
+  const port = parseInt(trimmedPort, 10);
+  if (port < 1 || port > 65535) {
+    throw new InvalidConfigurationError('Invalid configuration: PORT must be between 1 and 65535');
+  }
+
   return Object.freeze({
     env,
-    databaseUrl
+    databaseUrl,
+    port
   });
 }
 
