@@ -1,5 +1,8 @@
 import { getSystemBaseline, SystemContract } from '@union/shared';
-import { CoreLifecycle, LifecycleState } from './lifecycle.js';
+import { CoreLifecycle } from './lifecycle.js';
+import { createLogger } from '../logging/logger.js';
+
+const logger = createLogger('bootstrap');
 
 export interface CoreRuntimeIdentity {
   service: string;
@@ -44,10 +47,14 @@ export async function bootstrapCore(options: BootstrapOptions = {}): Promise<Cor
 
   if (options.attachSignalListeners) {
     const handleSignal = async (signal: string): Promise<void> => {
-      console.log(`[CORE] Received signal ${signal}, initiating controlled shutdown...`);
+      logger.info('CONTROLLED_SHUTDOWN_INITIATED', {
+        message: `Received signal ${signal}, initiating controlled shutdown...`
+      });
       try {
         await lifecycle.stop();
-        console.log(`[CORE] Lifecycle stopped successfully (${lifecycle.getState()})`);
+        logger.info('LIFECYCLE_STOPPED', {
+          message: `Lifecycle stopped successfully (${lifecycle.getState()})`
+        });
       } finally {
         detachSignalListeners();
       }

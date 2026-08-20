@@ -22,6 +22,17 @@ import {
   MissingDatabaseConfigurationError,
   runMigrations
 } from './db/migrations/runner.js';
+import {
+  createLogger,
+  FormattedLogEvent,
+  Logger,
+  LogLevel,
+  LogOptions,
+  SafeSerializedError,
+  sanitizeContext,
+  sanitizeError,
+  sanitizeString
+} from './logging/logger.js';
 import { getSystemBaseline, SystemContract } from '@union/shared';
 
 export {
@@ -47,7 +58,16 @@ export {
   MissingDatabaseConfigurationError,
   MalformedMigrationIdentityError,
   DuplicateMigrationIdentityError,
-  ChecksumMismatchError
+  ChecksumMismatchError,
+  createLogger,
+  Logger,
+  LogLevel,
+  FormattedLogEvent,
+  LogOptions,
+  SafeSerializedError,
+  sanitizeString,
+  sanitizeContext,
+  sanitizeError
 };
 
 export interface CoreStatus {
@@ -77,8 +97,16 @@ const isMainModule = (): boolean => {
 
 if (isMainModule()) {
   void (async () => {
-    console.log('[CORE] Starting @union/core runtime skeleton...');
+    const logger = createLogger('core-bootstrap', { env: process.env.UNION_ENV as UnionEnv });
+    logger.info('CORE_STARTED', { message: 'Starting @union/core runtime skeleton...' });
     const handle = await bootstrapCore({ attachSignalListeners: true });
-    console.log(`[CORE] Runtime started. Service: ${handle.identity.service}, Version: ${handle.identity.version}, Lifecycle: ${handle.lifecycle.getState()}`);
+    logger.info('CORE_RUNNING', {
+      message: 'Runtime started',
+      context: {
+        service: handle.identity.service,
+        version: handle.identity.version,
+        lifecycle: handle.lifecycle.getState()
+      }
+    });
   })();
 }
