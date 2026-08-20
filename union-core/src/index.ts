@@ -2,6 +2,15 @@ import url from 'node:url';
 import { bootstrapCore, CoreRuntimeHandle, CoreRuntimeIdentity } from './app/bootstrap.js';
 import { CoreLifecycle, InvalidLifecycleTransitionError, LifecycleState } from './app/lifecycle.js';
 import {
+  getSafeConfigSummary,
+  InvalidConfigurationError,
+  loadConfig,
+  MissingConfigurationError,
+  SafeConfigSummary,
+  UnionConfig,
+  UnionEnv
+} from './config/config.js';
+import {
   ChecksumMismatchError,
   computeChecksum,
   discoverMigrations,
@@ -22,6 +31,13 @@ export {
   bootstrapCore,
   CoreRuntimeHandle,
   CoreRuntimeIdentity,
+  loadConfig,
+  getSafeConfigSummary,
+  UnionConfig,
+  UnionEnv,
+  SafeConfigSummary,
+  MissingConfigurationError,
+  InvalidConfigurationError,
   runMigrations,
   computeChecksum,
   discoverMigrations,
