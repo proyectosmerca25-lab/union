@@ -14,6 +14,7 @@ import {
   MissingDatabaseConfigurationError,
   runMigrations
 } from './runner.js';
+import { EnvironmentMismatchError, InvalidConfigurationError } from '../../config/config.js';
 
 function getTestConfig() {
   const password = process.env.POSTGRES_PASSWORD ?? 'local_f1_5_c1_secret_key';
@@ -23,7 +24,9 @@ function getTestConfig() {
     database: process.env.POSTGRES_DB ?? 'union',
     user: process.env.POSTGRES_USER ?? 'union_app',
     password,
-    migrationsDir: path.resolve(process.cwd(), 'migrations')
+    migrationsDir: path.resolve(process.cwd(), 'migrations'),
+    env: 'local',
+    databaseEnv: 'local'
   };
 }
 
@@ -43,7 +46,7 @@ async function cleanDatabase(config = getTestConfig()) {
   }
 }
 
-test('TEST 1: Valid first migration applies successfully', async () => {
+test('TEST F: env=local & databaseEnv=local migration behavior remains PASS', async () => {
   const config = getTestConfig();
   await cleanDatabase(config);
 
@@ -118,10 +121,8 @@ test('TEST 5: Modify an already-applied migration in test context fails closed',
   const modifiedContent = originalContent + '\n-- Tampered comment for checksum test\n';
 
   try {
-    // Write tampered content temporarily
     await fs.writeFile(filePath, modifiedContent, 'utf8');
 
-    // Executing migration runner must throw ChecksumMismatchError
     await assert.rejects(
       async () => {
         await runMigrations(config);
@@ -133,7 +134,6 @@ test('TEST 5: Modify an already-applied migration in test context fails closed',
       }
     );
   } finally {
-    // Restore original content
     await fs.writeFile(filePath, originalContent, 'utf8');
   }
 });
@@ -142,7 +142,6 @@ test('TEST 6: Malformed or duplicate migration identity is rejected', async () =
   const tempDir = await fs.mkdtemp(path.join(process.cwd(), 'temp_migrations_'));
 
   try {
-    // Malformed filename test
     const malformedFile = path.join(tempDir, 'invalid_name.sql');
     await fs.writeFile(malformedFile, 'SELECT 1;', 'utf8');
 
@@ -156,7 +155,6 @@ test('TEST 6: Malformed or duplicate migration identity is rejected', async () =
       }
     );
 
-    // Remove malformed file and create duplicate ID files
     await fs.unlink(malformedFile);
     await fs.writeFile(path.join(tempDir, '0001_first.sql'), 'SELECT 1;', 'utf8');
     await fs.writeFile(path.join(tempDir, '0001_duplicate.sql'), 'SELECT 2;', 'utf8');
@@ -180,14 +178,12 @@ test('TEST 7: Failed migration inside transaction does NOT become recorded', asy
   const tempMigrationsDir = await fs.mkdtemp(path.join(process.cwd(), 'temp_failed_mig_'));
 
   try {
-    // Create valid 0001
     const sql0001 = await fs.readFile(
       path.join(config.migrationsDir, '0001_migration_foundation.sql'),
       'utf8'
     );
     await fs.writeFile(path.join(tempMigrationsDir, '0001_migration_foundation.sql'), sql0001, 'utf8');
 
-    // Create invalid 0002 that throws SQL syntax error
     await fs.writeFile(
       path.join(tempMigrationsDir, '0002_broken_sql.sql'),
       'INVALID SQL SYNTAX HERE;',
@@ -200,7 +196,6 @@ test('TEST 7: Failed migration inside transaction does NOT become recorded', asy
       await runMigrations(testConfig);
     });
 
-    // Check that 0002 was NOT recorded in union_schema_migrations
     const client = new pg.Client({
       host: config.host,
       port: config.port,
@@ -226,7 +221,7 @@ test('TEST 7: Failed migration inside transaction does NOT become recorded', asy
 test('TEST 8: Missing sensitive DB configuration fails closed', () => {
   assert.throws(
     () => {
-      getResolvedConfig({ password: '' });
+      getResolvedConfig({ env: 'local', databaseEnv: 'local', password: '' });
     },
     (err: unknown) => {
       assert.ok(err instanceof MissingDatabaseConfigurationError);
@@ -240,7 +235,7 @@ test('TEST 8: Missing sensitive DB configuration fails closed', () => {
   try {
     assert.throws(
       () => {
-        getResolvedConfig({});
+        getResolvedConfig({ env: 'local', databaseEnv: 'local' });
       },
       (err: unknown) => {
         assert.ok(err instanceof MissingDatabaseConfigurationError);
@@ -257,17 +252,101 @@ test('TEST 8: Missing sensitive DB configuration fails closed', () => {
 test('TEST 9: Concurrent runner execution cannot silently double-apply', async () => {
   const config = getTestConfig();
 
-  // Run two concurrent migration calls simultaneously
   const [res1, res2] = await Promise.all([
     runMigrations(config),
     runMigrations(config)
   ]);
 
-  // Total applied across both runners must equal 0 since 0001 is already applied
   assert.equal(res1.appliedCount + res2.appliedCount, 0);
   assert.equal(res1.alreadyAppliedCount, 1);
   assert.equal(res2.alreadyAppliedCount, 1);
-
-  // Lock constant check
   assert.equal(ADVISORY_LOCK_ID, 8641001);
+});
+
+// MANDATORY CORRECTION NEGATIVE TESTS (TEST A - TEST E)
+
+test('TEST A: env missing & databaseEnv=local -> FAIL CLOSED before DB connection', () => {
+  const originalUnionEnv = process.env.UNION_ENV;
+  delete process.env.UNION_ENV;
+
+  try {
+    assert.throws(
+      () => {
+        getResolvedConfig({ databaseEnv: 'local', password: 'fake' });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof MissingDatabaseConfigurationError);
+        assert.ok((err as MissingDatabaseConfigurationError).message.includes('UNION_ENV is required'));
+        return true;
+      }
+    );
+  } finally {
+    if (originalUnionEnv) process.env.UNION_ENV = originalUnionEnv;
+  }
+});
+
+test('TEST B: env=local & databaseEnv missing -> FAIL CLOSED before DB connection', () => {
+  const originalDbEnv = process.env.DATABASE_ENV;
+  delete process.env.DATABASE_ENV;
+
+  try {
+    assert.throws(
+      () => {
+        getResolvedConfig({ env: 'local', password: 'fake' });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof MissingDatabaseConfigurationError);
+        assert.ok((err as MissingDatabaseConfigurationError).message.includes('DATABASE_ENV is required'));
+        return true;
+      }
+    );
+  } finally {
+    if (originalDbEnv) process.env.DATABASE_ENV = originalDbEnv;
+  }
+});
+
+test('TEST C: Both environment identities missing -> FAIL CLOSED, no implicit local/local', () => {
+  const originalUnionEnv = process.env.UNION_ENV;
+  const originalDbEnv = process.env.DATABASE_ENV;
+  delete process.env.UNION_ENV;
+  delete process.env.DATABASE_ENV;
+
+  try {
+    assert.throws(
+      () => {
+        getResolvedConfig({ password: 'fake' });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof MissingDatabaseConfigurationError);
+        return true;
+      }
+    );
+  } finally {
+    if (originalUnionEnv) process.env.UNION_ENV = originalUnionEnv;
+    if (originalDbEnv) process.env.DATABASE_ENV = originalDbEnv;
+  }
+});
+
+test('TEST D: env=invalid & databaseEnv=invalid -> FAIL CLOSED', () => {
+  assert.throws(
+    () => {
+      getResolvedConfig({ env: 'staging', databaseEnv: 'staging', password: 'fake' });
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof InvalidConfigurationError);
+      return true;
+    }
+  );
+});
+
+test('TEST E: env=local & databaseEnv=production -> FAIL CLOSED before DB connection', () => {
+  assert.throws(
+    () => {
+      getResolvedConfig({ env: 'local', databaseEnv: 'production', password: 'fake' });
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof EnvironmentMismatchError);
+      return true;
+    }
+  );
 });

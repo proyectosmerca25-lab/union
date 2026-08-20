@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
-import { EnvironmentMismatchError } from '../../config/config.js';
+import { EnvironmentMismatchError, InvalidConfigurationError } from '../../config/config.js';
 
 export const ADVISORY_LOCK_ID = 8641001;
 
@@ -64,8 +64,32 @@ export function computeChecksum(content: string): string {
 }
 
 export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<Omit<MigrationConfig, 'env' | 'databaseEnv'>> & { env: string; databaseEnv: string } {
-  const env = customConfig.env ?? process.env.UNION_ENV ?? 'local';
-  const databaseEnv = customConfig.databaseEnv ?? process.env.DATABASE_ENV ?? 'local';
+  const rawEnv = customConfig.env ?? process.env.UNION_ENV;
+  if (!rawEnv || rawEnv.trim() === '') {
+    throw new MissingDatabaseConfigurationError(
+      'Missing required environment configuration: UNION_ENV is required for migration execution'
+    );
+  }
+  const env = rawEnv.trim();
+  const validEnvs = ['local', 'test', 'production'];
+  if (!validEnvs.includes(env)) {
+    throw new InvalidConfigurationError(
+      `Invalid environment configuration: UNION_ENV must be one of: local, test, production. Received: '${env}'`
+    );
+  }
+
+  const rawDbEnv = customConfig.databaseEnv ?? process.env.DATABASE_ENV;
+  if (!rawDbEnv || rawDbEnv.trim() === '') {
+    throw new MissingDatabaseConfigurationError(
+      'Missing required database environment configuration: DATABASE_ENV is required for migration execution'
+    );
+  }
+  const databaseEnv = rawDbEnv.trim();
+  if (!validEnvs.includes(databaseEnv)) {
+    throw new InvalidConfigurationError(
+      `Invalid database environment configuration: DATABASE_ENV must be one of: local, test, production. Received: '${databaseEnv}'`
+    );
+  }
 
   if (env !== databaseEnv) {
     throw new EnvironmentMismatchError(
