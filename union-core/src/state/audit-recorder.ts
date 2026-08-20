@@ -1,10 +1,53 @@
 import pg from 'pg';
-import { AuditEvent, RecordAuditEventInput } from './types.js';
+import {
+  AuditAction,
+  AuditActor,
+  AuditAuthorityBasis,
+  AuditAuthorityHolder,
+  AuditCoordinatedBy,
+  AuditEvent,
+  AuditExecutedBy,
+  AuditResult,
+  RecordAuditEventInput
+} from './types.js';
 import {
   DatabaseFailureError,
   InvalidInputError,
   NotFoundError
 } from './errors.js';
+
+const ALLOWED_AUTHORITY_HOLDERS: ReadonlySet<string> = new Set(['OWNER', 'UNION']);
+const ALLOWED_ACTORS: ReadonlySet<string> = new Set(['OWNER', 'UNION', 'SYSTEM']);
+const ALLOWED_AUTHORITY_BASES: ReadonlySet<string> = new Set([
+  'OWNER_EXPLICIT',
+  'OWNER_DELEGATED_ENVELOPE',
+  'FROZEN_DECISION',
+  'GOVERNANCE_RULE',
+  'THIN_AUTHORITY',
+  'SYSTEM_SAFETY_RULE'
+]);
+const ALLOWED_COORDINATED_BY: ReadonlySet<string> = new Set(['UNION']);
+const ALLOWED_EXECUTED_BY: ReadonlySet<string> = new Set([
+  'UNION_CORE',
+  'ANTIGRAVITY',
+  'GITHUB',
+  'RAILWAY'
+]);
+const ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
+  'PROJECT_CREATED',
+  'PROJECT_RENAMED',
+  'PROJECT_STATUS_CHANGED',
+  'SESSION_OPENED',
+  'SESSION_CLOSED',
+  'DECISION_CREATED',
+  'DECISION_CONTENT_UPDATED',
+  'DECISION_APPROVED',
+  'DECISION_FROZEN',
+  'DECISION_REOPENED',
+  'DECISION_REJECTED',
+  'DECISION_SUPERSEDED'
+]);
+const ALLOWED_RESULTS: ReadonlySet<string> = new Set(['SUCCESS', 'DENIED', 'FAILED']);
 
 function mapRowToAuditEvent(row: any): AuditEvent {
   let provenanceData: Record<string, unknown> | null = null;
@@ -21,14 +64,14 @@ function mapRowToAuditEvent(row: any): AuditEvent {
     sessionId: row.session_id || null,
     decisionId: row.decision_id || null,
     workOrderId: row.work_order_id || null,
-    actor: row.actor,
-    action: row.action,
-    authorityHolder: row.authority_holder,
-    authorityBasis: row.authority_basis,
+    actor: row.actor as AuditActor,
+    action: row.action as AuditAction,
+    authorityHolder: row.authority_holder as AuditAuthorityHolder,
+    authorityBasis: row.authority_basis as AuditAuthorityBasis,
     authorityReference: row.authority_reference || null,
-    coordinatedBy: row.coordinated_by,
-    executedBy: row.executed_by,
-    result: row.result,
+    coordinatedBy: row.coordinated_by as AuditCoordinatedBy,
+    executedBy: row.executed_by as AuditExecutedBy,
+    result: row.result as AuditResult,
     provenance: provenanceData,
     createdAt: new Date(row.created_at)
   };
@@ -44,45 +87,84 @@ export class AuditRecorder {
     if (!input) {
       throw new InvalidInputError('RecordAuditEventInput is required');
     }
-    if (!input.traceId || input.traceId.trim() === '') {
+
+    // Required string non-emptiness checks
+    if (!input.traceId || typeof input.traceId !== 'string' || input.traceId.trim() === '') {
       throw new InvalidInputError('traceId is required for audit recording');
     }
-    if (!input.projectId || input.projectId.trim() === '') {
+    if (!input.projectId || typeof input.projectId !== 'string' || input.projectId.trim() === '') {
       throw new InvalidInputError('projectId is required for audit recording');
     }
-    if (!input.actor || input.actor.trim() === '') {
+    if (!input.actor || typeof input.actor !== 'string' || input.actor.trim() === '') {
       throw new InvalidInputError('actor is required for audit recording');
     }
-    if (!input.action || input.action.trim() === '') {
+    if (!input.action || typeof input.action !== 'string' || input.action.trim() === '') {
       throw new InvalidInputError('action is required for audit recording');
     }
-    if (!input.authorityHolder || input.authorityHolder.trim() === '') {
+    if (!input.authorityHolder || typeof input.authorityHolder !== 'string' || input.authorityHolder.trim() === '') {
       throw new InvalidInputError('authorityHolder is required for audit recording');
     }
-    if (!input.authorityBasis || input.authorityBasis.trim() === '') {
+    if (!input.authorityBasis || typeof input.authorityBasis !== 'string' || input.authorityBasis.trim() === '') {
       throw new InvalidInputError('authorityBasis is required for audit recording');
     }
-    if (!input.coordinatedBy || input.coordinatedBy.trim() === '') {
+    if (!input.coordinatedBy || typeof input.coordinatedBy !== 'string' || input.coordinatedBy.trim() === '') {
       throw new InvalidInputError('coordinatedBy is required for audit recording');
     }
-    if (!input.executedBy || input.executedBy.trim() === '') {
+    if (!input.executedBy || typeof input.executedBy !== 'string' || input.executedBy.trim() === '') {
       throw new InvalidInputError('executedBy is required for audit recording');
     }
-    if (!input.result || input.result.trim() === '') {
+    if (!input.result || typeof input.result !== 'string' || input.result.trim() === '') {
       throw new InvalidInputError('result is required for audit recording');
     }
 
-    const disallowedAuthorityHolders = [
-      'ANTIGRAVITY',
-      'GITHUB',
-      'TENCENT',
-      'GRAPHIFY',
-      'OPENAI',
-      'RAILWAY'
-    ];
-    if (disallowedAuthorityHolders.includes(input.authorityHolder.trim().toUpperCase())) {
+    const trimmedAuthorityHolder = input.authorityHolder.trim();
+    const trimmedActor = input.actor.trim();
+    const trimmedAuthorityBasis = input.authorityBasis.trim();
+    const trimmedCoordinatedBy = input.coordinatedBy.trim();
+    const trimmedExecutedBy = input.executedBy.trim();
+    const trimmedAction = input.action.trim();
+    const trimmedResult = input.result.trim();
+
+    // 1. FAIL-CLOSED ALLOWLIST VALIDATIONS
+    if (!ALLOWED_AUTHORITY_HOLDERS.has(trimmedAuthorityHolder)) {
       throw new InvalidInputError(
-        `Invalid authority_holder: Capabilities/tools cannot possess authority ('${input.authorityHolder}')`
+        `Invalid authority_holder: '${input.authorityHolder}' is not in allowed list [OWNER, UNION]`
+      );
+    }
+
+    if (!ALLOWED_ACTORS.has(trimmedActor)) {
+      throw new InvalidInputError(
+        `Invalid actor: '${input.actor}' is not in allowed list [OWNER, UNION, SYSTEM]`
+      );
+    }
+
+    if (!ALLOWED_AUTHORITY_BASES.has(trimmedAuthorityBasis)) {
+      throw new InvalidInputError(
+        `Invalid authority_basis: '${input.authorityBasis}' is not in allowed list [OWNER_EXPLICIT, OWNER_DELEGATED_ENVELOPE, FROZEN_DECISION, GOVERNANCE_RULE, THIN_AUTHORITY, SYSTEM_SAFETY_RULE]`
+      );
+    }
+
+    if (!ALLOWED_COORDINATED_BY.has(trimmedCoordinatedBy)) {
+      throw new InvalidInputError(
+        `Invalid coordinated_by: '${input.coordinatedBy}' must equal 'UNION'`
+      );
+    }
+
+    if (!ALLOWED_EXECUTED_BY.has(trimmedExecutedBy)) {
+      throw new InvalidInputError(
+        `Invalid executed_by: '${input.executedBy}' is not in allowed list [UNION_CORE, ANTIGRAVITY, GITHUB, RAILWAY]`
+      );
+    }
+
+    if (!ALLOWED_ACTIONS.has(trimmedAction)) {
+      throw new InvalidInputError(
+        `Invalid action: '${input.action}' is not a recognized audit action`
+      );
+    }
+
+    if (!ALLOWED_RESULTS.has(trimmedResult)) {
+      throw new InvalidInputError(
+        `Invalid result: '${input.result}' must be one of: SUCCESS, DENIED, FAILED`
       );
     }
 
@@ -104,14 +186,14 @@ export class AuditRecorder {
           input.sessionId || null,
           input.decisionId || null,
           input.workOrderId || null,
-          input.actor.trim(),
-          input.action.trim(),
-          input.authorityHolder.trim(),
-          input.authorityBasis.trim(),
+          trimmedActor,
+          trimmedAction,
+          trimmedAuthorityHolder,
+          trimmedAuthorityBasis,
           input.authorityReference ? input.authorityReference.trim() : null,
-          input.coordinatedBy.trim(),
-          input.executedBy.trim(),
-          input.result.trim(),
+          trimmedCoordinatedBy,
+          trimmedExecutedBy,
+          trimmedResult,
           provJson
         ]
       );
@@ -119,12 +201,12 @@ export class AuditRecorder {
     } catch (err: unknown) {
       if (err instanceof InvalidInputError) throw err;
       if (typeof err === 'object' && err !== null && 'code' in err) {
-        const pgErr = err as { code: string; message?: string };
+        const pgErr = err as { code: string };
         if (pgErr.code === '23503') { // foreign key violation
-          throw new NotFoundError(`Foreign key reference not found during audit recording: ${pgErr.message}`);
+          throw new NotFoundError('Referenced record not found during audit recording');
         }
       }
-      throw new DatabaseFailureError('Failed to record audit event', err);
+      throw new DatabaseFailureError('Failed to record audit event');
     }
   }
 
@@ -143,7 +225,7 @@ export class AuditRecorder {
       return mapRowToAuditEvent(res.rows[0]);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to fetch audit event '${auditEventId}'`, err);
+      throw new DatabaseFailureError('Failed to fetch audit event');
     }
   }
 
@@ -159,7 +241,7 @@ export class AuditRecorder {
       return res.rows.map(mapRowToAuditEvent);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to list audit events for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to list audit events for project');
     }
   }
 }

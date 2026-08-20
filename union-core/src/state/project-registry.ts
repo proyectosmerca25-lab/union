@@ -39,13 +39,22 @@ export class ProjectRegistry {
     return { txClient: this.client as pg.Client, shouldRelease: false };
   }
 
+  private validateManagerAuditContext(auditContext: AuditContext): void {
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+    if (auditContext.executedBy !== 'UNION_CORE') {
+      throw new InvalidInputError(
+        `Invalid executedBy: '${auditContext.executedBy}' must be 'UNION_CORE' for canonical manager operations`
+      );
+    }
+  }
+
   async createProject(input: CreateProjectInput, auditContext: AuditContext): Promise<Project> {
     if (!input || !input.displayName || input.displayName.trim() === '') {
       throw new InvalidInputError('Project display_name is required and cannot be empty');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -75,7 +84,7 @@ export class ProjectRegistry {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError('Failed to create project', err);
+      throw new DatabaseFailureError('Failed to create project');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -103,7 +112,7 @@ export class ProjectRegistry {
       return mapRowToProject(res.rows[0]);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to fetch project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to fetch project');
     }
   }
 
@@ -116,7 +125,7 @@ export class ProjectRegistry {
       );
       return res.rows.map(mapRowToProject);
     } catch (err: unknown) {
-      throw new DatabaseFailureError('Failed to list projects', err);
+      throw new DatabaseFailureError('Failed to list projects');
     }
   }
 
@@ -131,9 +140,7 @@ export class ProjectRegistry {
     if (!displayName || displayName.trim() === '') {
       throw new InvalidInputError('display_name is required and cannot be empty');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -168,7 +175,7 @@ export class ProjectRegistry {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to update display_name for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to update display_name for project');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -190,9 +197,7 @@ export class ProjectRegistry {
         `Invalid project status: '${status}'. Must be one of: ACTIVE, PAUSED, ARCHIVED`
       );
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -227,7 +232,7 @@ export class ProjectRegistry {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to change status for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to change status for project');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();

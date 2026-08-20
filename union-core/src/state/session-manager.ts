@@ -40,13 +40,22 @@ export class SessionManager {
     return { txClient: this.client as pg.Client, shouldRelease: false };
   }
 
+  private validateManagerAuditContext(auditContext: AuditContext): void {
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+    if (auditContext.executedBy !== 'UNION_CORE') {
+      throw new InvalidInputError(
+        `Invalid executedBy: '${auditContext.executedBy}' must be 'UNION_CORE' for canonical manager operations`
+      );
+    }
+  }
+
   async openSession(projectId: string, auditContext: AuditContext): Promise<Session> {
     if (!projectId || projectId.trim() === '') {
       throw new InvalidInputError('project_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -80,7 +89,7 @@ export class SessionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to open session for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to open session for project');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -108,7 +117,7 @@ export class SessionManager {
       return mapRowToSession(res.rows[0]);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to fetch session '${sessionId}'`, err);
+      throw new DatabaseFailureError('Failed to fetch session');
     }
   }
 
@@ -131,7 +140,7 @@ export class SessionManager {
       return res.rows.map(mapRowToSession);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to list sessions for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to list sessions for project');
     }
   }
 
@@ -139,9 +148,7 @@ export class SessionManager {
     if (!sessionId || sessionId.trim() === '') {
       throw new InvalidInputError('session_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -181,7 +188,7 @@ export class SessionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to close session '${sessionId}'`, err);
+      throw new DatabaseFailureError('Failed to close session');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();

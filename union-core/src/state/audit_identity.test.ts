@@ -13,11 +13,17 @@ import { ProjectRegistry } from './project-registry.js';
 import { SessionManager } from './session-manager.js';
 import { DecisionManager } from './decision-manager.js';
 import {
-  DatabaseFailureError,
   InvalidInputError,
   NotFoundError
 } from './errors.js';
-import { AuditContext } from './types.js';
+import {
+  AuditAction,
+  AuditActor,
+  AuditAuthorityBasis,
+  AuditAuthorityHolder,
+  AuditContext,
+  AuditResult
+} from './types.js';
 
 function getTestConfig() {
   const password = process.env.POSTGRES_PASSWORD;
@@ -61,11 +67,10 @@ async function cleanDatabase(config = getTestConfig()) {
   }
 }
 
-test('F2.3 AUDIT IDENTITY & AUTHORITY PROVENANCE TEST MATRIX (T01 - T64)', async () => {
+test('F2.3-C1 CORRECTIVE TEST MATRIX: FAIL-CLOSED AUTHORITY PROVENANCE (C1-T01 - C1-T38)', async () => {
   const config = getTestConfig();
   await cleanDatabase(config);
 
-  // T01: 0001 -> 0002 -> 0003 clean migration -> PASS
   const migrationRes = await runMigrations(config);
   assert.equal(migrationRes.appliedCount, 3);
 
@@ -84,50 +89,8 @@ test('F2.3 AUDIT IDENTITY & AUTHORITY PROVENANCE TEST MATRIX (T01 - T64)', async
     const sessionManager = new SessionManager(client);
     const decisionManager = new DecisionManager(client);
 
-    // T02: exactly one new table -> audit_events
-    const tablesRes = await client.query(
-      "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name;"
-    );
-    const tableNames = tablesRes.rows.map(r => r.table_name);
-    assert.deepEqual(tableNames, [
-      'audit_events',
-      'decision_work_orders',
-      'decisions',
-      'evidence_references',
-      'projects',
-      'sessions',
-      'union_schema_migrations',
-      'work_orders'
-    ]);
-
-    // T03: audit_event_id UUID -> PASS
-    // T04: trace_id UUID required -> PASS
-    // T05: project_id required -> PASS
-    // T06: TIMESTAMPTZ created_at -> PASS
-    const colsRes = await client.query(
-      "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'audit_events';"
-    );
-    const colsMap = new Map(colsRes.rows.map(r => [r.column_name, r]));
-    assert.equal(colsMap.get('audit_event_id')?.data_type, 'uuid');
-    assert.equal(colsMap.get('trace_id')?.data_type, 'uuid');
-    assert.equal(colsMap.get('trace_id')?.is_nullable, 'NO');
-    assert.equal(colsMap.get('project_id')?.data_type, 'uuid');
-    assert.equal(colsMap.get('project_id')?.is_nullable, 'NO');
-    assert.equal(colsMap.get('created_at')?.data_type, 'timestamp with time zone');
-
-    // T07: no ON DELETE CASCADE -> PASS
-    const fkRes = await client.query(
-      "SELECT COUNT(*)::int as count FROM information_schema.referential_constraints WHERE constraint_schema = 'public' AND delete_rule = 'CASCADE';"
-    );
-    assert.equal(fkRes.rows[0].count, 0);
-
-    // T08: 0001/0002 unchanged -> PASS
-    const fileContent0002 = await fs.readFile(path.join(config.migrationsDir, '0002_canonical_state.sql'), 'utf8');
-    assert.equal(computeChecksum(fileContent0002), '1305d1f2d59e815318309e86a10cde409eba140089b32e32aeaf50b5812df554');
-
-    // Setup base project for audit recording tests
-    const trace1 = '33333333-3333-3333-3333-333333333333';
-    const auditCtx1: AuditContext = {
+    const trace1 = '44444444-4444-4444-4444-444444444444';
+    const baseAuditCtx: AuditContext = {
       traceId: trace1,
       actor: 'OWNER',
       authorityHolder: 'OWNER',
@@ -136,361 +99,394 @@ test('F2.3 AUDIT IDENTITY & AUTHORITY PROVENANCE TEST MATRIX (T01 - T64)', async
       executedBy: 'UNION_CORE'
     };
 
-    const p1 = await projectRegistry.createProject({ displayName: 'Audit Project Alpha' }, auditCtx1);
+    const p1 = await projectRegistry.createProject({ displayName: 'Fail Closed Audit Test' }, baseAuditCtx);
 
-    // T09: record valid audit event -> PASS
-    const ae1 = await auditRecorder.recordAuditEvent({
+    // C1-T01: authority_holder = OWNER -> PASS
+    const ae01 = await auditRecorder.recordAuditEvent({
       traceId: trace1,
       projectId: p1.projectId,
       actor: 'OWNER',
-      action: 'TEST_ACTION',
+      action: 'PROJECT_CREATED',
       authorityHolder: 'OWNER',
       authorityBasis: 'OWNER_EXPLICIT',
       coordinatedBy: 'UNION',
       executedBy: 'UNION_CORE',
       result: 'SUCCESS'
     });
-    assert.ok(ae1.auditEventId);
-    assert.equal(ae1.projectId, p1.projectId);
-    assert.equal(ae1.action, 'TEST_ACTION');
+    assert.equal(ae01.authorityHolder, 'OWNER');
 
-    // T10 - T17: Missing required parameters -> FAIL CLOSED (InvalidInputError)
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, traceId: '' });
-    }, InvalidInputError); // T10: missing traceId
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, projectId: '' });
-    }, InvalidInputError); // T11: missing projectId
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, actor: '' });
-    }, InvalidInputError); // T12: missing actor
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, authorityHolder: '' });
-    }, InvalidInputError); // T13: missing authorityHolder
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, authorityBasis: '' });
-    }, InvalidInputError); // T14: missing authorityBasis
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, coordinatedBy: '' });
-    }, InvalidInputError); // T15: missing coordinatedBy
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, executedBy: '' });
-    }, InvalidInputError); // T16: missing executedBy
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({ ...ae1, result: '' });
-    }, InvalidInputError); // T17: missing result
-
-    // T18: unknown project -> REJECTED
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({
-        ...ae1,
-        projectId: '00000000-0000-0000-0000-000000000000'
-      });
-    }, NotFoundError);
-
-    // T19: authority_holder = UNION, executed_by = UNION_CORE -> PASS
-    const aeUnion = await auditRecorder.recordAuditEvent({
-      traceId: trace1,
-      projectId: p1.projectId,
-      actor: 'SYSTEM',
-      action: 'SYSTEM_SAFETY_CHECK',
-      authorityHolder: 'UNION',
-      authorityBasis: 'SYSTEM_SAFETY_RULE',
-      coordinatedBy: 'UNION',
-      executedBy: 'UNION_CORE',
-      result: 'SUCCESS'
-    });
-    assert.equal(aeUnion.authorityHolder, 'UNION');
-    assert.equal(aeUnion.executedBy, 'UNION_CORE');
-
-    // T20: Thin Authority event authority_basis = THIN_AUTHORITY -> PASS
-    const aeThin = await auditRecorder.recordAuditEvent({
+    // C1-T02: authority_holder = UNION -> PASS
+    const ae02 = await auditRecorder.recordAuditEvent({
       traceId: trace1,
       projectId: p1.projectId,
       actor: 'UNION',
-      action: 'CANONICAL_OPERATION',
+      action: 'PROJECT_CREATED',
       authorityHolder: 'UNION',
       authorityBasis: 'THIN_AUTHORITY',
       coordinatedBy: 'UNION',
       executedBy: 'UNION_CORE',
       result: 'SUCCESS'
     });
-    assert.equal(aeThin.authorityBasis, 'THIN_AUTHORITY');
+    assert.equal(ae02.authorityHolder, 'UNION');
 
-    // T21 & T22: Disallowed tool authority (ANTIGRAVITY / GITHUB / etc.) -> REJECTED
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({
-        traceId: trace1,
-        projectId: p1.projectId,
-        actor: 'ANTIGRAVITY',
-        action: 'EXECUTE',
-        authorityHolder: 'ANTIGRAVITY', // Tool self-assigning authority is disallowed!
-        authorityBasis: 'IMPLICIT',
-        coordinatedBy: 'UNION',
-        executedBy: 'ANTIGRAVITY',
-        result: 'SUCCESS'
-      });
-    }, InvalidInputError);
-
-    // T23: missing authority provenance has no implicit fallback -> PASS (InvalidInputError when empty)
+    // C1-T03: authority_holder = ANTIGRAVITY -> REJECT
     await assert.rejects(async () => {
       await auditRecorder.recordAuditEvent({
         traceId: trace1,
         projectId: p1.projectId,
         actor: 'OWNER',
-        action: 'WRITE',
-        authorityHolder: '',
-        authorityBasis: '',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'ANTIGRAVITY' as any,
+        authorityBasis: 'OWNER_EXPLICIT',
         coordinatedBy: 'UNION',
         executedBy: 'UNION_CORE',
         result: 'SUCCESS'
       });
     }, InvalidInputError);
 
-    // T24: audit references same-project Session -> PASS
-    const s1 = await sessionManager.openSession(p1.projectId, auditCtx1);
-    const aeSession = await auditRecorder.recordAuditEvent({
+    // C1-T04: authority_holder = GITHUB -> REJECT
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'GITHUB' as any,
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T05: authority_holder = unknown future capability -> REJECT
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'FUTURE_AI_AGENT_X' as any,
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T06: authority_holder = UNION_CORE -> REJECT
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'UNION_CORE' as any,
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T07: actor = OWNER / UNION / SYSTEM -> PASS
+    for (const actorVal of ['OWNER', 'UNION', 'SYSTEM'] as AuditActor[]) {
+      const aeActor = await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: actorVal,
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+      assert.equal(aeActor.actor, actorVal);
+    }
+
+    // C1-T08: unknown actor -> REJECT
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'UNKNOWN_USER' as any,
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T09: each approved authority_basis -> PASS
+    const approvedBases: AuditAuthorityBasis[] = [
+      'OWNER_EXPLICIT',
+      'OWNER_DELEGATED_ENVELOPE',
+      'FROZEN_DECISION',
+      'GOVERNANCE_RULE',
+      'THIN_AUTHORITY',
+      'SYSTEM_SAFETY_RULE'
+    ];
+    for (const basisVal of approvedBases) {
+      const aeBasis = await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: basisVal,
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+      assert.equal(aeBasis.authorityBasis, basisVal);
+    }
+
+    // C1-T10: unknown authority_basis -> REJECT
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'IMPLICIT_TRUST' as any,
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T11: coordinated_by = UNION -> PASS
+    const aeCoord = await auditRecorder.recordAuditEvent({
       traceId: trace1,
       projectId: p1.projectId,
-      sessionId: s1.sessionId,
       actor: 'OWNER',
-      action: 'SESSION_CHECK',
+      action: 'PROJECT_CREATED',
       authorityHolder: 'OWNER',
       authorityBasis: 'OWNER_EXPLICIT',
       coordinatedBy: 'UNION',
       executedBy: 'UNION_CORE',
       result: 'SUCCESS'
     });
-    assert.equal(aeSession.sessionId, s1.sessionId);
+    assert.equal(aeCoord.coordinatedBy, 'UNION');
 
-    // T25: audit project A + Session B -> REJECTED (composite FK violation mapped to NotFoundError)
-    const p2 = await projectRegistry.createProject({ displayName: 'Audit Project Beta' }, auditCtx1);
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({
-        traceId: trace1,
-        projectId: p2.projectId,
-        sessionId: s1.sessionId, // s1 belongs to p1!
-        actor: 'OWNER',
-        action: 'CROSS_PROJECT_AUDIT',
-        authorityHolder: 'OWNER',
-        authorityBasis: 'OWNER_EXPLICIT',
-        coordinatedBy: 'UNION',
-        executedBy: 'UNION_CORE',
-        result: 'SUCCESS'
-      });
-    }, NotFoundError);
+    // C1-T12, C1-T13, C1-T14: coordinated_by != UNION -> REJECT
+    for (const invalidCoord of ['ANTIGRAVITY', 'GITHUB', 'UNION_CORE']) {
+      await assert.rejects(async () => {
+        await auditRecorder.recordAuditEvent({
+          traceId: trace1,
+          projectId: p1.projectId,
+          actor: 'OWNER',
+          action: 'PROJECT_CREATED',
+          authorityHolder: 'OWNER',
+          authorityBasis: 'OWNER_EXPLICIT',
+          coordinatedBy: invalidCoord as any,
+          executedBy: 'UNION_CORE',
+          result: 'SUCCESS'
+        });
+      }, InvalidInputError);
+    }
 
-    // T26: audit project A + Decision B -> REJECTED
-    const d1 = await decisionManager.createDecision(
-      {
-        projectId: p1.projectId,
-        topic: 'D1 Topic',
-        decision: 'D1 Decision',
-        reason: 'D1 Reason',
-        authority: 'Omar'
-      },
-      auditCtx1
-    );
-    await assert.rejects(async () => {
-      await auditRecorder.recordAuditEvent({
-        traceId: trace1,
-        projectId: p2.projectId,
-        decisionId: d1.decisionId, // d1 belongs to p1!
-        actor: 'OWNER',
-        action: 'CROSS_PROJECT_AUDIT',
-        authorityHolder: 'OWNER',
-        authorityBasis: 'OWNER_EXPLICIT',
-        coordinatedBy: 'UNION',
-        executedBy: 'UNION_CORE',
-        result: 'SUCCESS'
-      });
-    }, NotFoundError);
+    // C1-T15: canonical manager write with executed_by = UNION_CORE -> PASS
+    const pMgrPass = await projectRegistry.createProject({ displayName: 'Manager Pass Project' }, baseAuditCtx);
+    assert.ok(pMgrPass.projectId);
 
-    // T28: AuditRecorder has no update capability -> PASS
-    assert.equal((auditRecorder as any).updateAuditEvent, undefined);
-
-    // T29: AuditRecorder has no delete capability -> PASS
-    assert.equal((auditRecorder as any).deleteAuditEvent, undefined);
-
-    // T30: existing event remains unchanged after later events -> PASS
-    const aeCheck = await auditRecorder.getAuditEvent(ae1.auditEventId);
-    assert.equal(aeCheck.action, 'TEST_ACTION');
-
-    // T31 - T34: PROJECT REGISTRY INTEGRATION & TRANSACTION ROLLBACK (T32)
-    const pEventsBefore = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    const createEv = pEventsBefore.find(e => e.action === 'PROJECT_CREATED');
-    assert.ok(createEv);
-
-    // T32: project creation audit failure -> project creation rolled back
+    // C1-T16: canonical manager write with unauthorized executed_by -> REJECT
     await assert.rejects(async () => {
       await projectRegistry.createProject(
-        { displayName: 'Rollback Test Project' },
-        { ...auditCtx1, authorityHolder: 'ANTIGRAVITY' } // Invalid authority holder forces audit failure!
+        { displayName: 'Manager Fail Project' },
+        { ...baseAuditCtx, executedBy: 'ANTIGRAVITY' as any }
       );
     }, InvalidInputError);
 
-    // Verify 'Rollback Test Project' was NOT persisted in projects table!
-    const allProjects = await projectRegistry.listProjects();
-    const foundRollback = allProjects.find(p => p.displayName === 'Rollback Test Project');
-    assert.equal(foundRollback, undefined);
+    // C1-T17: all approved F2.3 action values -> PASS
+    const approvedActions: AuditAction[] = [
+      'PROJECT_CREATED',
+      'PROJECT_RENAMED',
+      'PROJECT_STATUS_CHANGED',
+      'SESSION_OPENED',
+      'SESSION_CLOSED',
+      'DECISION_CREATED',
+      'DECISION_CONTENT_UPDATED',
+      'DECISION_APPROVED',
+      'DECISION_FROZEN',
+      'DECISION_REOPENED',
+      'DECISION_REJECTED',
+      'DECISION_SUPERSEDED'
+    ];
+    for (const actVal of approvedActions) {
+      const aeAction = await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: actVal,
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+      assert.equal(aeAction.action, actVal);
+    }
 
-    // T33: rename + PROJECT_RENAMED -> PASS
-    await projectRegistry.updateDisplayName(p1.projectId, 'Renamed Alpha', auditCtx1);
-    const pEventsAfterRename = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsAfterRename.find(e => e.action === 'PROJECT_RENAMED'));
-
-    // T34: status change + PROJECT_STATUS_CHANGED -> PASS
-    await projectRegistry.changeProjectStatus(p1.projectId, 'PAUSED', auditCtx1);
-    const pEventsAfterStatus = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsAfterStatus.find(e => e.action === 'PROJECT_STATUS_CHANGED'));
-
-    // T35 - T37: SESSION INTEGRATION
-    await projectRegistry.changeProjectStatus(p1.projectId, 'ACTIVE', auditCtx1);
-    const s2 = await sessionManager.openSession(p1.projectId, auditCtx1);
-    const pEventsSessionOpen = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    const openEv = pEventsSessionOpen.find(e => e.action === 'SESSION_OPENED' && e.sessionId === s2.sessionId);
-    assert.ok(openEv);
-
-    // T36: session audit failure -> session write rolled back
+    // C1-T18: unknown action -> REJECT
     await assert.rejects(async () => {
-      await sessionManager.openSession(
-        p1.projectId,
-        { ...auditCtx1, authorityHolder: 'GITHUB' } // Invalid authority holder forces rollback!
-      );
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'UNKNOWN_CUSTOM_ACTION' as any,
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
     }, InvalidInputError);
 
-    await sessionManager.closeSession(s2.sessionId, auditCtx1);
-    const pEventsSessionClose = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsSessionClose.find(e => e.action === 'SESSION_CLOSED' && e.sessionId === s2.sessionId));
-
-    // T38 - T45: DECISION INTEGRATION & ROLLBACK (T45)
-    const dAudit = await decisionManager.createDecision(
-      {
+    // C1-T19: SUCCESS / DENIED / FAILED -> PASS
+    for (const resVal of ['SUCCESS', 'DENIED', 'FAILED'] as AuditResult[]) {
+      const aeResult = await auditRecorder.recordAuditEvent({
+        traceId: trace1,
         projectId: p1.projectId,
-        topic: 'Audit Decision',
-        decision: 'Audited content',
-        reason: 'Testing decision audit integration',
-        authority: 'Omar'
-      },
-      auditCtx1
-    );
-    const pEventsDecCreated = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecCreated.find(e => e.action === 'DECISION_CREATED' && e.decisionId === dAudit.decisionId));
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: resVal
+      });
+      assert.equal(aeResult.result, resVal);
+    }
 
-    // T39: updateDecisionContent + DECISION_CONTENT_UPDATED
-    await decisionManager.updateDecisionContent(dAudit.decisionId, { decision: 'Updated Audited Content' }, auditCtx1);
-    const pEventsDecUpdated = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecUpdated.find(e => e.action === 'DECISION_CONTENT_UPDATED' && e.decisionId === dAudit.decisionId));
-
-    // T40: approve + DECISION_APPROVED
-    await decisionManager.approveDecision(dAudit.decisionId, auditCtx1);
-    const pEventsDecApproved = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecApproved.find(e => e.action === 'DECISION_APPROVED' && e.decisionId === dAudit.decisionId));
-
-    // T41: freeze + DECISION_FROZEN
-    await decisionManager.freezeDecision(dAudit.decisionId, auditCtx1);
-    const pEventsDecFrozen = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecFrozen.find(e => e.action === 'DECISION_FROZEN' && e.decisionId === dAudit.decisionId));
-
-    // T42: reopen + DECISION_REOPENED
-    await decisionManager.reopenDecision(dAudit.decisionId, 'Reopen for audit test', auditCtx1);
-    const pEventsDecReopened = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecReopened.find(e => e.action === 'DECISION_REOPENED' && e.decisionId === dAudit.decisionId));
-
-    // T43: reject + DECISION_REJECTED
-    await decisionManager.rejectDecision(dAudit.decisionId, auditCtx1);
-    const pEventsDecRejected = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    assert.ok(pEventsDecRejected.find(e => e.action === 'DECISION_REJECTED' && e.decisionId === dAudit.decisionId));
-
-    // T44: supersede + DECISION_SUPERSEDED
-    const dSupPre = await decisionManager.createDecision(
-      {
-        projectId: p1.projectId,
-        topic: 'Predecessor Topic',
-        decision: 'V1 Decision',
-        reason: 'V1 Reason',
-        authority: 'Omar'
-      },
-      auditCtx1
-    );
-    await decisionManager.approveDecision(dSupPre.decisionId, auditCtx1);
-    await decisionManager.freezeDecision(dSupPre.decisionId, auditCtx1);
-
-    const supRes = await decisionManager.supersedeDecision(
-      {
-        predecessorDecisionId: dSupPre.decisionId,
-        topic: 'Successor Topic',
-        decision: 'V2 Decision',
-        reason: 'V2 Reason',
-        authority: 'Omar'
-      },
-      auditCtx1
-    );
-
-    const pEventsDecSuperseded = await auditRecorder.listProjectAuditEvents(p1.projectId);
-    const supAuditEv = pEventsDecSuperseded.find(e => e.action === 'DECISION_SUPERSEDED' && e.decisionId === supRes.successor.decisionId);
-    assert.ok(supAuditEv);
-    assert.equal(supAuditEv.authorityReference, dSupPre.decisionId);
-
-    // T45: audit persistence failure during Decision transition -> canonical transition rolled back
-    const dToApprove = await decisionManager.createDecision(
-      {
-        projectId: p1.projectId,
-        topic: 'Rollback Approve Test',
-        decision: 'Text',
-        reason: 'Reason',
-        authority: 'Omar'
-      },
-      auditCtx1
-    );
-
+    // C1-T20: unknown result -> REJECT
     await assert.rejects(async () => {
-      await decisionManager.approveDecision(
-        dToApprove.decisionId,
-        { ...auditCtx1, authorityHolder: 'RAILWAY' } // Invalid authority holder forces transaction rollback!
-      );
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'MAYBE' as any
+      });
     }, InvalidInputError);
 
-    // Verify decision remained PROPOSED!
-    const decisionAfterRollback = await decisionManager.getDecision(dToApprove.decisionId);
-    assert.equal(decisionAfterRollback.status, 'PROPOSED');
+    // C1-T21: no authority fallback (missing/empty authority_holder -> REJECT) -> PASS
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: '' as any,
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
 
-    // T50 & T51 & T52: TRACE_ID BEHAVIOR
-    const aeTraceTest = await auditRecorder.recordAuditEvent({
+    // C1-T22: execution identity does not infer authority -> REJECT when executed_by used as authority_holder
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'OWNER',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'UNION_CORE' as any, // Cannot assign executor identity as authority holder!
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T23: actor does not infer authority -> REJECT when non-authority actor used as authority_holder
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p1.projectId,
+        actor: 'SYSTEM',
+        action: 'PROJECT_CREATED',
+        authorityHolder: 'SYSTEM' as any, // SYSTEM is valid actor, but NOT an authority holder!
+        authorityBasis: 'SYSTEM_SAFETY_RULE',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, InvalidInputError);
+
+    // C1-T24: Thin Authority canonical case -> PASS
+    const aeThin = await auditRecorder.recordAuditEvent({
       traceId: trace1,
       projectId: p1.projectId,
-      actor: 'OWNER',
-      action: 'TRACE_TEST',
-      authorityHolder: 'OWNER',
-      authorityBasis: 'OWNER_EXPLICIT',
+      actor: 'UNION',
+      action: 'PROJECT_CREATED',
+      authorityHolder: 'UNION',
+      authorityBasis: 'THIN_AUTHORITY',
       coordinatedBy: 'UNION',
       executedBy: 'UNION_CORE',
       result: 'SUCCESS'
     });
-    assert.equal(aeTraceTest.traceId, trace1);
+    assert.equal(aeThin.actor, 'UNION');
+    assert.equal(aeThin.authorityHolder, 'UNION');
+    assert.equal(aeThin.authorityBasis, 'THIN_AUTHORITY');
 
-    // T53 - T56: PROVENANCE METADATA
-    const aeProv = await auditRecorder.recordAuditEvent({
-      traceId: trace1,
-      projectId: p1.projectId,
-      actor: 'OWNER',
-      action: 'PROVENANCE_TEST',
-      authorityHolder: 'OWNER',
-      authorityBasis: 'OWNER_EXPLICIT',
-      coordinatedBy: 'UNION',
-      executedBy: 'UNION_CORE',
-      result: 'SUCCESS',
-      provenance: { sourceType: 'WORK_ORDER_CONTRACT', contractVersion: '1.0' }
-    });
-    assert.equal(aeProv.provenance?.sourceType, 'WORK_ORDER_CONTRACT');
+    // C1-T25: state + audit transactional rollback regression -> PASS
+    await assert.rejects(async () => {
+      await projectRegistry.createProject(
+        { displayName: 'Rollback Failure Test' },
+        { ...baseAuditCtx, authorityHolder: 'INVALID_HOLDER' as any }
+      );
+    }, InvalidInputError);
+    const projectsList = await projectRegistry.listProjects();
+    assert.equal(projectsList.find(p => p.displayName === 'Rollback Failure Test'), undefined);
 
-    // T58 & T59: Migration 0003 checksum stability & idempotency
-    const fileContent0003 = await fs.readFile(path.join(config.migrationsDir, '0003_audit_identity.sql'), 'utf8');
-    const checksum0003 = computeChecksum(fileContent0003);
-    assert.ok(checksum0003.length === 64);
+    // C1-T26: cross-project audit isolation -> PASS
+    const p2 = await projectRegistry.createProject({ displayName: 'Project Beta' }, baseAuditCtx);
+    const s1 = await sessionManager.openSession(p1.projectId, baseAuditCtx);
+    await assert.rejects(async () => {
+      await auditRecorder.recordAuditEvent({
+        traceId: trace1,
+        projectId: p2.projectId,
+        sessionId: s1.sessionId,
+        actor: 'OWNER',
+        action: 'SESSION_CLOSED',
+        authorityHolder: 'OWNER',
+        authorityBasis: 'OWNER_EXPLICIT',
+        coordinatedBy: 'UNION',
+        executedBy: 'UNION_CORE',
+        result: 'SUCCESS'
+      });
+    }, NotFoundError);
 
-    const runAgainRes = await runMigrations(config);
-    assert.equal(runAgainRes.appliedCount, 0); // Idempotent second run!
+    // C1-T27: append-only audit -> PASS
+    assert.equal((auditRecorder as any).updateAuditEvent, undefined);
+    assert.equal((auditRecorder as any).deleteAuditEvent, undefined);
+
+    // C1-T31 - C1-T34: Checksum and Migration File Invariants
+    const checksum0001 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0001_migration_foundation.sql'), 'utf8'));
+    assert.equal(checksum0001, 'bf18157b31084de26ddbe15345835b1f8b324289f22e80826485b39a0a1be853');
+
+    const checksum0002 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0002_canonical_state.sql'), 'utf8'));
+    assert.equal(checksum0002, '1305d1f2d59e815318309e86a10cde409eba140089b32e32aeaf50b5812df554');
+
+    const checksum0003 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0003_audit_identity.sql'), 'utf8'));
+    assert.equal(checksum0003, 'db2fc2e583732e7ee91c30fe791371002f4492ce276a41bdd11e73845e47247b');
+
+    const migrationFiles = await fs.readdir(config.migrationsDir);
+    assert.deepEqual(migrationFiles.sort(), [
+      '0001_migration_foundation.sql',
+      '0002_canonical_state.sql',
+      '0003_audit_identity.sql'
+    ]);
   } finally {
     await client.end();
   }

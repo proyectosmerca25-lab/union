@@ -66,6 +66,17 @@ export class DecisionManager {
     return { txClient: this.client as pg.Client, shouldRelease: false };
   }
 
+  private validateManagerAuditContext(auditContext: AuditContext): void {
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+    if (auditContext.executedBy !== 'UNION_CORE') {
+      throw new InvalidInputError(
+        `Invalid executedBy: '${auditContext.executedBy}' must be 'UNION_CORE' for canonical manager operations`
+      );
+    }
+  }
+
   async createDecision(input: CreateDecisionInput, auditContext: AuditContext): Promise<Decision> {
     if (!input || !input.projectId || input.projectId.trim() === '') {
       throw new InvalidInputError('project_id is required');
@@ -82,9 +93,7 @@ export class DecisionManager {
     if (!input.authority || input.authority.trim() === '') {
       throw new InvalidInputError('authority is required and cannot be empty');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -141,7 +150,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError('Failed to create decision', err);
+      throw new DatabaseFailureError('Failed to create decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -167,7 +176,7 @@ export class DecisionManager {
       return mapRowToDecision(res.rows[0]);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to fetch decision '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to fetch decision');
     }
   }
 
@@ -187,7 +196,7 @@ export class DecisionManager {
       return res.rows.map(mapRowToDecision);
     } catch (err: unknown) {
       if (err instanceof NotFoundError || err instanceof InvalidInputError) throw err;
-      throw new DatabaseFailureError(`Failed to list decisions for project '${projectId}'`, err);
+      throw new DatabaseFailureError('Failed to list decisions for project');
     }
   }
 
@@ -195,9 +204,7 @@ export class DecisionManager {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -238,7 +245,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to approve decision '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to approve decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -250,9 +257,7 @@ export class DecisionManager {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -293,7 +298,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to freeze decision '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to freeze decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -305,9 +310,7 @@ export class DecisionManager {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -348,7 +351,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to reject decision '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to reject decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -364,9 +367,7 @@ export class DecisionManager {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -407,7 +408,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to reopen decision '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to reopen decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -423,9 +424,7 @@ export class DecisionManager {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -485,7 +484,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to update decision content for '${decisionId}'`, err);
+      throw new DatabaseFailureError('Failed to update decision content');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
@@ -500,9 +499,7 @@ export class DecisionManager {
     if (!input || !input.predecessorDecisionId || input.predecessorDecisionId.trim() === '') {
       throw new InvalidInputError('predecessorDecisionId is required');
     }
-    if (!auditContext) {
-      throw new InvalidInputError('AuditContext is required for audited write operation');
-    }
+    this.validateManagerAuditContext(auditContext);
 
     const { txClient, shouldRelease } = await this.getTxClient();
 
@@ -597,7 +594,7 @@ export class DecisionManager {
     } catch (err: unknown) {
       await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
-      throw new DatabaseFailureError(`Failed to supersede decision '${input.predecessorDecisionId}'`, err);
+      throw new DatabaseFailureError('Failed to supersede decision');
     } finally {
       if (shouldRelease && 'release' in txClient) {
         (txClient as pg.PoolClient).release();
