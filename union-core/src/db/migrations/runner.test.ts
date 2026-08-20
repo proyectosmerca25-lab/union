@@ -350,3 +350,131 @@ test('TEST E: env=local & databaseEnv=production -> FAIL CLOSED before DB connec
     }
   );
 });
+
+// CANONICAL DATABASE_URL TESTS (TEST A - TEST G)
+
+test('TEST A (DATABASE_URL): DATABASE_URL valid & UNION_ENV=production & DATABASE_ENV=production -> config accepted', () => {
+  const config = getResolvedConfig({
+    env: 'production',
+    databaseEnv: 'production',
+    connectionString: 'postgresql://postgres:secretpassword@postgres.railway.internal:5432/railway'
+  });
+  assert.equal(config.env, 'production');
+  assert.equal(config.databaseEnv, 'production');
+  assert.equal(
+    config.connectionString,
+    'postgresql://postgres:secretpassword@postgres.railway.internal:5432/railway'
+  );
+});
+
+test('TEST B (DATABASE_URL): DATABASE_URL valid & environment identity missing -> FAIL CLOSED', () => {
+  const origUnionEnv = process.env.UNION_ENV;
+  const origDbEnv = process.env.DATABASE_ENV;
+  delete process.env.UNION_ENV;
+  delete process.env.DATABASE_ENV;
+
+  try {
+    assert.throws(
+      () => {
+        getResolvedConfig({
+          connectionString: 'postgresql://postgres:secretpassword@postgres.railway.internal:5432/railway'
+        });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof MissingDatabaseConfigurationError);
+        assert.ok((err as MissingDatabaseConfigurationError).message.includes('UNION_ENV is required'));
+        return true;
+      }
+    );
+  } finally {
+    if (origUnionEnv) process.env.UNION_ENV = origUnionEnv;
+    if (origDbEnv) process.env.DATABASE_ENV = origDbEnv;
+  }
+});
+
+test('TEST C (DATABASE_URL): DATABASE_URL valid & UNION_ENV=production & DATABASE_ENV=local -> FAIL CLOSED', () => {
+  assert.throws(
+    () => {
+      getResolvedConfig({
+        env: 'production',
+        databaseEnv: 'local',
+        connectionString: 'postgresql://postgres:secretpassword@postgres.railway.internal:5432/railway'
+      });
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof EnvironmentMismatchError);
+      return true;
+    }
+  );
+});
+
+test('TEST D (DATABASE_URL): DATABASE_URL malformed -> FAIL CLOSED', () => {
+  const invalidUrls = [
+    'not_a_valid_url',
+    'mysql://user:pass@localhost:3306/db',
+    'postgresql://',
+    'postgres://:5432/'
+  ];
+
+  for (const invalidUrl of invalidUrls) {
+    assert.throws(
+      () => {
+        getResolvedConfig({
+          env: 'production',
+          databaseEnv: 'production',
+          connectionString: invalidUrl
+        });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidConfigurationError);
+        assert.ok((err as InvalidConfigurationError).message.includes('Invalid DATABASE_URL configuration'));
+        return true;
+      }
+    );
+  }
+});
+
+test('TEST E (DATABASE_URL): DATABASE_URL absent & alternative DB config incomplete -> FAIL CLOSED', () => {
+  const origDbUrl = process.env.DATABASE_URL;
+  const origPass = process.env.POSTGRES_PASSWORD;
+  delete process.env.DATABASE_URL;
+  delete process.env.POSTGRES_PASSWORD;
+
+  try {
+    assert.throws(
+      () => {
+        getResolvedConfig({
+          env: 'production',
+          databaseEnv: 'production'
+        });
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof MissingDatabaseConfigurationError);
+        assert.ok((err as MissingDatabaseConfigurationError).message.includes('POSTGRES_PASSWORD is required'));
+        return true;
+      }
+    );
+  } finally {
+    if (origDbUrl) process.env.DATABASE_URL = origDbUrl;
+    if (origPass) process.env.POSTGRES_PASSWORD = origPass;
+  }
+});
+
+test('TEST G (DATABASE_URL): No DATABASE_URL or password appears in error messages', () => {
+  const secretPass = 'super_secret_p@ssw0rd_123!';
+  const secretUrl = `postgresql://postgres:${secretPass}@postgres.railway.internal:5432/railway`;
+
+  try {
+    getResolvedConfig({
+      env: 'production',
+      databaseEnv: 'local',
+      connectionString: secretUrl
+    });
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      assert.ok(!err.message.includes(secretPass));
+      assert.ok(!err.message.includes(secretUrl));
+    }
+  }
+});
+

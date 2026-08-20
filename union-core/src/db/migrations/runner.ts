@@ -40,9 +40,22 @@ export interface MigrationConfig {
   database?: string;
   user?: string;
   password?: string;
+  connectionString?: string;
   migrationsDir?: string;
   env?: string;
   databaseEnv?: string;
+}
+
+export interface ResolvedMigrationConfig {
+  host?: string;
+  port?: number;
+  database?: string;
+  user?: string;
+  password?: string;
+  connectionString?: string;
+  migrationsDir: string;
+  env: string;
+  databaseEnv: string;
 }
 
 export interface DiscoveredMigration {
@@ -59,11 +72,17 @@ export interface MigrationResult {
   migrations: string[];
 }
 
+export function discoverMigrations(migrationsDir: string): Promise<DiscoveredMigration[]> {
+  return discoverMigrationsImpl(migrationsDir);
+}
+
 export function computeChecksum(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<Omit<MigrationConfig, 'env' | 'databaseEnv'>> & { env: string; databaseEnv: string } {
+export function getResolvedConfig(
+  customConfig: MigrationConfig = {}
+): ResolvedMigrationConfig {
   const rawEnv = customConfig.env ?? process.env.UNION_ENV;
   if (!rawEnv || rawEnv.trim() === '') {
     throw new MissingDatabaseConfigurationError(
@@ -97,13 +116,52 @@ export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<
     );
   }
 
+  const migrationsDir = customConfig.migrationsDir ?? path.resolve(process.cwd(), 'migrations');
+
+  const connectionString = customConfig.connectionString ?? process.env.DATABASE_URL;
+
+  if (connectionString && connectionString.trim() !== '') {
+    const trimmedUrl = connectionString.trim();
+    try {
+      const parsedUrl = new URL(trimmedUrl);
+      if (parsedUrl.protocol !== 'postgres:' && parsedUrl.protocol !== 'postgresql:') {
+        throw new InvalidConfigurationError(
+          'Invalid DATABASE_URL configuration: protocol must be postgres: or postgresql:'
+        );
+      }
+      if (!parsedUrl.hostname || parsedUrl.hostname.trim() === '') {
+        throw new InvalidConfigurationError(
+          'Invalid DATABASE_URL configuration: hostname is missing'
+        );
+      }
+      if (!parsedUrl.pathname || parsedUrl.pathname === '/' || parsedUrl.pathname.trim() === '') {
+        throw new InvalidConfigurationError(
+          'Invalid DATABASE_URL configuration: database name is missing'
+        );
+      }
+    } catch (err: unknown) {
+      if (err instanceof InvalidConfigurationError) {
+        throw err;
+      }
+      throw new InvalidConfigurationError(
+        'Invalid DATABASE_URL configuration: malformed connection string'
+      );
+    }
+
+    return {
+      connectionString: trimmedUrl,
+      migrationsDir,
+      env,
+      databaseEnv
+    };
+  }
+
   const host = customConfig.host ?? process.env.POSTGRES_HOST ?? 'localhost';
   const portStr = customConfig.port ?? process.env.POSTGRES_PORT ?? 5432;
   const port = typeof portStr === 'number' ? portStr : parseInt(String(portStr), 10);
   const database = customConfig.database ?? process.env.POSTGRES_DB ?? 'union';
   const user = customConfig.user ?? process.env.POSTGRES_USER ?? 'union_app';
   const password = customConfig.password ?? process.env.POSTGRES_PASSWORD;
-  const migrationsDir = customConfig.migrationsDir ?? path.resolve(process.cwd(), 'migrations');
 
   if (!password || password.trim() === '') {
     throw new MissingDatabaseConfigurationError(
@@ -123,7 +181,7 @@ export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<
   };
 }
 
-export async function discoverMigrations(migrationsDir: string): Promise<DiscoveredMigration[]> {
+async function discoverMigrationsImpl(migrationsDir: string): Promise<DiscoveredMigration[]> {
   let entries: string[];
   try {
     entries = await fs.readdir(migrationsDir);
@@ -136,17 +194,17 @@ export async function discoverMigrations(migrationsDir: string): Promise<Discove
   const seenIds = new Set<string>();
 
   for (const filename of sqlFiles) {
-    const match = /^(\d{4})_[\w-]+\.sql$/.exec(filename);
+    const match = filename.match(/^(\d{4})_.*\.sql$/);
     if (!match) {
       throw new MalformedMigrationIdentityError(
-        `Invalid migration filename format '${filename}'. Expected '0001_name.sql'`
+        `Invalid migration filename format '${filename}'. Expected format: NNNN_description.sql (e.g. 0001_foundation.sql)`
       );
     }
 
     const id = match[1];
     if (seenIds.has(id)) {
       throw new DuplicateMigrationIdentityError(
-        `Duplicate migration ID '${id}' detected in file '${filename}'`
+        `Duplicate migration ID '${id}' found in file '${filename}'`
       );
     }
     seenIds.add(id);
@@ -172,13 +230,17 @@ export async function runMigrations(customConfig: MigrationConfig = {}): Promise
   const config = getResolvedConfig(customConfig);
   const discovered = await discoverMigrations(config.migrationsDir);
 
-  const client = new pg.Client({
-    host: config.host,
-    port: config.port,
-    database: config.database,
-    user: config.user,
-    password: config.password
-  });
+  const clientConfig: pg.ClientConfig = config.connectionString
+    ? { connectionString: config.connectionString }
+    : {
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        user: config.user,
+        password: config.password
+      };
+
+  const client = new pg.Client(clientConfig);
 
   await client.connect();
 
