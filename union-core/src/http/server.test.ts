@@ -25,6 +25,8 @@ function fetchUrl(url: string, method = 'GET'): Promise<{ status: number; header
 test('TEST 1: Valid PORT accepted in config', () => {
   const config = loadConfig({
     UNION_ENV: 'local',
+    UNION_INSTANCE_ID: 'union-local',
+    DATABASE_ENV: 'local',
     DATABASE_URL: FAKE_DB_SECRET,
     PORT: '3000'
   });

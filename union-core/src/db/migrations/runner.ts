@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import pg from 'pg';
+import { EnvironmentMismatchError } from '../../config/config.js';
 
 export const ADVISORY_LOCK_ID = 8641001;
 
@@ -40,6 +41,8 @@ export interface MigrationConfig {
   user?: string;
   password?: string;
   migrationsDir?: string;
+  env?: string;
+  databaseEnv?: string;
 }
 
 export interface DiscoveredMigration {
@@ -60,7 +63,16 @@ export function computeChecksum(content: string): string {
   return crypto.createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
-export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<MigrationConfig> {
+export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<Omit<MigrationConfig, 'env' | 'databaseEnv'>> & { env: string; databaseEnv: string } {
+  const env = customConfig.env ?? process.env.UNION_ENV ?? 'local';
+  const databaseEnv = customConfig.databaseEnv ?? process.env.DATABASE_ENV ?? 'local';
+
+  if (env !== databaseEnv) {
+    throw new EnvironmentMismatchError(
+      `Environment isolation mismatch: UNION_ENV ('${env}') must equal DATABASE_ENV ('${databaseEnv}')`
+    );
+  }
+
   const host = customConfig.host ?? process.env.POSTGRES_HOST ?? 'localhost';
   const portStr = customConfig.port ?? process.env.POSTGRES_PORT ?? 5432;
   const port = typeof portStr === 'number' ? portStr : parseInt(String(portStr), 10);
@@ -81,7 +93,9 @@ export function getResolvedConfig(customConfig: MigrationConfig = {}): Required<
     database,
     user,
     password,
-    migrationsDir
+    migrationsDir,
+    env,
+    databaseEnv
   };
 }
 

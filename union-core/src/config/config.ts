@@ -2,12 +2,16 @@ export type UnionEnv = 'local' | 'test' | 'production';
 
 export interface UnionConfig {
   readonly env: UnionEnv;
+  readonly instanceId: string;
+  readonly databaseEnv: UnionEnv;
   readonly databaseUrl: string;
   readonly port: number;
 }
 
 export interface SafeConfigSummary {
   readonly environment: UnionEnv;
+  readonly instanceId: string;
+  readonly databaseEnvironment: UnionEnv;
   readonly databaseConfigured: boolean;
 }
 
@@ -22,6 +26,13 @@ export class InvalidConfigurationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidConfigurationError';
+  }
+}
+
+export class EnvironmentMismatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'EnvironmentMismatchError';
   }
 }
 
@@ -41,6 +52,31 @@ export function loadConfig(envSource?: Record<string, string | undefined>): Unio
     );
   }
   const env = trimmedEnv as UnionEnv;
+
+  const rawInstanceId = envMap.UNION_INSTANCE_ID;
+  if (!rawInstanceId || rawInstanceId.trim() === '') {
+    throw new MissingConfigurationError('Missing required configuration: UNION_INSTANCE_ID is required');
+  }
+  const instanceId = rawInstanceId.trim();
+
+  const rawDbEnv = envMap.DATABASE_ENV;
+  if (!rawDbEnv || rawDbEnv.trim() === '') {
+    throw new MissingConfigurationError('Missing required configuration: DATABASE_ENV is required');
+  }
+
+  const trimmedDbEnv = rawDbEnv.trim();
+  if (!validEnvs.includes(trimmedDbEnv as UnionEnv)) {
+    throw new InvalidConfigurationError(
+      `Invalid configuration: DATABASE_ENV must be one of: local, test, production. Received: '${trimmedDbEnv}'`
+    );
+  }
+  const databaseEnv = trimmedDbEnv as UnionEnv;
+
+  if (env !== databaseEnv) {
+    throw new EnvironmentMismatchError(
+      `Environment isolation mismatch: UNION_ENV ('${env}') must equal DATABASE_ENV ('${databaseEnv}')`
+    );
+  }
 
   const rawDbUrl = envMap.DATABASE_URL;
   if (!rawDbUrl || rawDbUrl.trim() === '') {
@@ -64,6 +100,8 @@ export function loadConfig(envSource?: Record<string, string | undefined>): Unio
 
   return Object.freeze({
     env,
+    instanceId,
+    databaseEnv,
     databaseUrl,
     port
   });
@@ -72,6 +110,8 @@ export function loadConfig(envSource?: Record<string, string | undefined>): Unio
 export function getSafeConfigSummary(config: UnionConfig): SafeConfigSummary {
   return Object.freeze({
     environment: config.env,
+    instanceId: config.instanceId,
+    databaseEnvironment: config.databaseEnv,
     databaseConfigured: Boolean(config.databaseUrl && config.databaseUrl.trim() !== '')
   });
 }

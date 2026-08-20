@@ -2,6 +2,7 @@ import url from 'node:url';
 import { bootstrapCore, CoreRuntimeHandle, CoreRuntimeIdentity } from './app/bootstrap.js';
 import { CoreLifecycle, InvalidLifecycleTransitionError, LifecycleState } from './app/lifecycle.js';
 import {
+  EnvironmentMismatchError,
   getSafeConfigSummary,
   InvalidConfigurationError,
   loadConfig,
@@ -54,6 +55,7 @@ export {
   SafeConfigSummary,
   MissingConfigurationError,
   InvalidConfigurationError,
+  EnvironmentMismatchError,
   runMigrations,
   computeChecksum,
   discoverMigrations,
