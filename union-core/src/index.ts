@@ -40,6 +40,7 @@ import {
   sanitizeString
 } from './logging/logger.js';
 import { getSystemBaseline, SystemContract } from '@union/shared';
+export * from './state/index.js';
 
 export {
   CoreLifecycle,
