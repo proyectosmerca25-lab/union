@@ -4,7 +4,7 @@ import http from 'node:http';
 import path from 'node:path';
 import { bootstrapCore } from '../app/bootstrap.js';
 import { EnvironmentMismatchError, loadConfig } from '../config/config.js';
-import { runMigrations } from '../db/migrations/runner.js';
+import { MissingDatabaseConfigurationError, runMigrations } from '../db/migrations/runner.js';
 import { createHttpServer } from '../http/server.js';
 import { createLogger } from '../logging/logger.js';
 
@@ -23,7 +23,12 @@ function fetchUrl(url: string): Promise<{ status: number; body: string }> {
 }
 
 test('TEST 15 & TEST 16 & TEST 17 & TEST 18: Local Foundation E2E Validation', async () => {
-  const password = process.env.POSTGRES_PASSWORD ?? 'local_f1_5_c1_secret_key';
+  const password = process.env.POSTGRES_PASSWORD;
+  if (!password || password.trim() === '') {
+    throw new MissingDatabaseConfigurationError(
+      'Missing required database configuration: POSTGRES_PASSWORD is required and cannot be empty'
+    );
+  }
   const databaseUrl = `postgresql://union_app:${password}@localhost:5432/union`;
 
   // 1. Validate configuration
@@ -100,7 +105,7 @@ test('TEST 15 & TEST 16 & TEST 17 & TEST 18: Local Foundation E2E Validation', a
 });
 
 test('E2E MISMATCH PATH: Mismatch fails closed before DB execution', async () => {
-  const password = process.env.POSTGRES_PASSWORD ?? 'local_f1_5_c1_secret_key';
+  const password = process.env.POSTGRES_PASSWORD ?? 'dummy_value_for_mismatch_test';
   const databaseUrl = `postgresql://union_app:${password}@localhost:5432/union`;
 
   // Config validation fails before DB execution

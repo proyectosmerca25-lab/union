@@ -5,11 +5,13 @@ import path from 'node:path';
 import pg from 'pg';
 import {
   computeChecksum,
-  runMigrations
+  MissingDatabaseConfigurationError,
+  runMigrations,
+  getResolvedConfig
 } from './runner.js';
 
 function getTestConfig() {
-  const password = process.env.POSTGRES_PASSWORD ?? 'local_f1_5_c1_secret_key';
+  const password = process.env.POSTGRES_PASSWORD;
   return {
     host: process.env.POSTGRES_HOST ?? 'localhost',
     port: parseInt(process.env.POSTGRES_PORT ?? '5432', 10),
@@ -23,6 +25,11 @@ function getTestConfig() {
 }
 
 async function cleanDatabase(config = getTestConfig()) {
+  if (!config.password || config.password.trim() === '') {
+    throw new MissingDatabaseConfigurationError(
+      'Missing required database configuration: POSTGRES_PASSWORD is required and cannot be empty'
+    );
+  }
   const client = new pg.Client({
     host: config.host,
     port: config.port,
