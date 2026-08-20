@@ -107,16 +107,57 @@ const isMainModule = (): boolean => {
 
 if (isMainModule()) {
   void (async () => {
-    const logger = createLogger('core-bootstrap', { env: process.env.UNION_ENV as UnionEnv });
-    logger.info('CORE_STARTED', { message: 'Starting @union/core runtime skeleton...' });
-    const handle = await bootstrapCore({ attachSignalListeners: true });
-    logger.info('CORE_RUNNING', {
-      message: 'Runtime started',
-      context: {
-        service: handle.identity.service,
-        version: handle.identity.version,
-        lifecycle: handle.lifecycle.getState()
-      }
-    });
+    try {
+      const config = loadConfig();
+      const logger = createLogger('core-bootstrap', { env: config.env });
+      logger.info('CORE_STARTED', { message: 'Starting @union/core runtime and HTTP health server...' });
+
+      const coreHandle = await bootstrapCore();
+
+      const httpHandle = createHttpServer({
+        port: config.port,
+        env: config.env,
+        serviceVersion: coreHandle.identity.version,
+        logger
+      });
+
+      await httpHandle.listen();
+
+      logger.info('CORE_RUNNING', {
+        message: 'Runtime and HTTP health server started successfully',
+        context: {
+          service: coreHandle.identity.service,
+          version: coreHandle.identity.version,
+          lifecycle: coreHandle.lifecycle.getState(),
+          port: httpHandle.getPort()
+        }
+      });
+
+      const shutdown = async (signal: string) => {
+        logger.info('CONTROLLED_SHUTDOWN_INITIATED', {
+          message: `Received ${signal}, shutting down HTTP server and Core lifecycle...`
+        });
+        try {
+          await httpHandle.close();
+          await coreHandle.stop();
+          logger.info('LIFECYCLE_STOPPED', { message: 'HTTP server and Core stopped cleanly' });
+        } catch (err) {
+          logger.error('SHUTDOWN_ERROR', {
+            message: `Error during shutdown: ${err instanceof Error ? err.message : String(err)}`
+          });
+          process.exit(1);
+        }
+      };
+
+      process.once('SIGINT', () => { void shutdown('SIGINT'); });
+      process.once('SIGTERM', () => { void shutdown('SIGTERM'); });
+    } catch (err) {
+      const fallbackLogger = createLogger('core-bootstrap');
+      fallbackLogger.error('CORE_BOOTSTRAP_FAILED', {
+        message: `Failed to start @union/core: ${err instanceof Error ? err.message : String(err)}`,
+        error: err instanceof Error ? err : new Error(String(err))
+      });
+      process.exit(1);
+    }
   })();
 }

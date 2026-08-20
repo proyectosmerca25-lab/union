@@ -24,7 +24,7 @@
     "db:migrate": "node dist/db/migrations/cli.js",
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "test": "node --test dist/**/*.test.js",
+    "test": "node --test --test-concurrency=1 dist/**/*.test.js",
     "clean": "tsc -b --clean"
   }
 }
