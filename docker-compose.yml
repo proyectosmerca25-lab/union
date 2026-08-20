@@ -1,0 +1,25 @@
+name: union
+
+services:
+  union-postgres:
+    container_name: union-postgres
+    image: postgres:18.4
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-union}
+      POSTGRES_USER: ${POSTGRES_USER:-union_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-union_dev_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - union-postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-union_app} -d $${POSTGRES_DB:-union}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+volumes:
+  union-postgres-data:
+    name: union-postgres-data

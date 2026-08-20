@@ -18,7 +18,10 @@
     "build": "tsc -b && npm run build --workspace=@union/web",
     "typecheck": "tsc -b",
     "test": "npm run build && npm run test --workspaces",
-    "clean": "tsc -b --clean"
+    "clean": "tsc -b --clean",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "db:status": "docker compose ps"
   },
   "devDependencies": {
     "@types/node": "^22.13.4",
