@@ -39,6 +39,7 @@ async function cleanDatabase(config = getTestConfig()) {
   });
   await client.connect();
   try {
+    await client.query('DROP TABLE IF EXISTS audit_events CASCADE;');
     await client.query('DROP TABLE IF EXISTS evidence_references CASCADE;');
     await client.query('DROP TABLE IF EXISTS decision_work_orders CASCADE;');
     await client.query('DROP TABLE IF EXISTS work_orders CASCADE;');
@@ -55,16 +56,16 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
   const config = getTestConfig();
   await cleanDatabase(config);
 
-  // T01: 0001 -> 0002 clean migration = PASS
+  // T01: 0001 -> 0002 -> 0003 clean migration = PASS
   const firstRun = await runMigrations(config);
-  assert.equal(firstRun.appliedCount, 2);
+  assert.equal(firstRun.appliedCount, 3);
   assert.equal(firstRun.alreadyAppliedCount, 0);
-  assert.deepEqual(firstRun.migrations, ['0001_migration_foundation.sql', '0002_canonical_state.sql']);
+  assert.deepEqual(firstRun.migrations, ['0001_migration_foundation.sql', '0002_canonical_state.sql', '0003_audit_identity.sql']);
 
   // T27: Second migration-runner execution = IDEMPOTENT / PASS
   const secondRun = await runMigrations(config);
   assert.equal(secondRun.appliedCount, 0);
-  assert.equal(secondRun.alreadyAppliedCount, 2);
+  assert.equal(secondRun.alreadyAppliedCount, 3);
 
   const client = new pg.Client({
     host: config.host,
@@ -82,6 +83,7 @@ test('F2.1 CANONICAL STATE SCHEMA FOUNDATION TEST SUITE (T01 - T34)', async () =
     );
     const tables = tableRes.rows.map(r => r.table_name);
     const expectedTables = [
+      'audit_events',
       'decision_work_orders',
       'decisions',
       'evidence_references',

@@ -1,5 +1,6 @@
 import pg from 'pg';
 import {
+  AuditContext,
   CreateDecisionInput,
   Decision,
   DecisionStatus,
@@ -17,6 +18,7 @@ import {
 } from './errors.js';
 import { ProjectRegistry } from './project-registry.js';
 import { SessionManager } from './session-manager.js';
+import { AuditRecorder } from './audit-recorder.js';
 
 function mapRowToDecision(row: any): Decision {
   let altConsidered: unknown[] | null = null;
@@ -47,13 +49,24 @@ function mapRowToDecision(row: any): Decision {
 export class DecisionManager {
   private readonly projectRegistry: ProjectRegistry;
   private readonly sessionManager: SessionManager;
+  private readonly auditRecorder: AuditRecorder;
 
   constructor(private readonly client: pg.Client | pg.Pool) {
     this.projectRegistry = new ProjectRegistry(client);
     this.sessionManager = new SessionManager(client);
+    this.auditRecorder = new AuditRecorder(client);
   }
 
-  async createDecision(input: CreateDecisionInput): Promise<Decision> {
+  private async getTxClient(): Promise<{ txClient: pg.ClientBase; shouldRelease: boolean }> {
+    const isPool = 'totalCount' in this.client || 'idleCount' in this.client;
+    if (isPool) {
+      const txClient = await (this.client as pg.Pool).connect();
+      return { txClient, shouldRelease: true };
+    }
+    return { txClient: this.client as pg.Client, shouldRelease: false };
+  }
+
+  async createDecision(input: CreateDecisionInput, auditContext: AuditContext): Promise<Decision> {
     if (!input || !input.projectId || input.projectId.trim() === '') {
       throw new InvalidInputError('project_id is required');
     }
@@ -69,24 +82,31 @@ export class DecisionManager {
     if (!input.authority || input.authority.trim() === '') {
       throw new InvalidInputError('authority is required and cannot be empty');
     }
-
-    // Verify project exists
-    await this.projectRegistry.getProject(input.projectId);
-
-    // If session_id provided, verify session exists and belongs to same project
-    if (input.sessionId) {
-      const session = await this.sessionManager.getSession(input.sessionId);
-      if (session.projectId !== input.projectId) {
-        throw new CrossProjectViolationError(
-          `Cross-project isolation violation: Session '${input.sessionId}' belongs to project '${session.projectId}', not '${input.projectId}'`
-        );
-      }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
     }
 
-    const altJson = input.alternativesConsidered ? JSON.stringify(input.alternativesConsidered) : null;
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      // Verify project exists in transaction
+      await this.projectRegistry.getProject(input.projectId, txClient);
+
+      // If session_id provided, verify session exists and belongs to same project
+      if (input.sessionId) {
+        const session = await this.sessionManager.getSession(input.sessionId, txClient);
+        if (session.projectId !== input.projectId) {
+          throw new CrossProjectViolationError(
+            `Cross-project isolation violation: Session '${input.sessionId}' belongs to project '${session.projectId}', not '${input.projectId}'`
+          );
+        }
+      }
+
+      const altJson = input.alternativesConsidered ? JSON.stringify(input.alternativesConsidered) : null;
+
+      const res = await txClient.query(
         `INSERT INTO decisions (
            project_id, session_id, topic, decision, status, reason, alternatives_considered, authority
          )
@@ -97,27 +117,47 @@ export class DecisionManager {
           input.sessionId || null,
           input.topic.trim(),
           input.decision.trim(),
-          input.reason ? input.reason.trim() : null,
+          input.reason.trim(),
           altJson,
           input.authority.trim()
         ]
       );
-      return mapRowToDecision(res.rows[0]);
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_CREATED',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
-      if (err instanceof NotFoundError || err instanceof InvalidInputError || err instanceof CrossProjectViolationError) {
-        throw err;
-      }
+      await txClient.query('ROLLBACK;').catch(() => {});
+      if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError('Failed to create decision', err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
   }
 
-  async getDecision(decisionId: string): Promise<Decision> {
+  async getDecision(decisionId: string, clientOverride?: pg.ClientBase): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
 
+    const targetClient = clientOverride || this.client;
+
     try {
-      const res = await this.client.query(
+      const res = await targetClient.query(
         `SELECT * FROM decisions WHERE decision_id = $1;`,
         [decisionId]
       );
@@ -151,180 +191,320 @@ export class DecisionManager {
     }
   }
 
-  async approveDecision(decisionId: string): Promise<Decision> {
+  async approveDecision(decisionId: string, auditContext: AuditContext): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      const res = await txClient.query(
         `UPDATE decisions
          SET status = 'APPROVED', decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE decision_id = $1 AND status IN ('PROPOSED', 'REOPENED')
          RETURNING *;`,
         [decisionId]
       );
-      if (res.rows.length > 0) {
-        return mapRowToDecision(res.rows[0]);
+
+      if (res.rows.length === 0) {
+        const current = await this.getDecision(decisionId, txClient);
+        throw new InvalidStateTransitionError(
+          `Invalid state transition: Cannot approve decision in '${current.status}' state`
+        );
       }
+
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_APPROVED',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
+      await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError(`Failed to approve decision '${decisionId}'`, err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
-
-    const current = await this.getDecision(decisionId);
-    throw new InvalidStateTransitionError(
-      `Invalid state transition: Cannot approve decision in '${current.status}' state`
-    );
   }
 
-  async freezeDecision(decisionId: string): Promise<Decision> {
+  async freezeDecision(decisionId: string, auditContext: AuditContext): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      const res = await txClient.query(
         `UPDATE decisions
          SET status = 'FROZEN', updated_at = CURRENT_TIMESTAMP
          WHERE decision_id = $1 AND status = 'APPROVED'
          RETURNING *;`,
         [decisionId]
       );
-      if (res.rows.length > 0) {
-        return mapRowToDecision(res.rows[0]);
+
+      if (res.rows.length === 0) {
+        const current = await this.getDecision(decisionId, txClient);
+        throw new InvalidStateTransitionError(
+          `Invalid state transition: Cannot freeze decision in '${current.status}' state`
+        );
       }
+
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_FROZEN',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
+      await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError(`Failed to freeze decision '${decisionId}'`, err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
-
-    const current = await this.getDecision(decisionId);
-    throw new InvalidStateTransitionError(
-      `Invalid state transition: Cannot freeze decision in '${current.status}' state`
-    );
   }
 
-  async rejectDecision(decisionId: string): Promise<Decision> {
+  async rejectDecision(decisionId: string, auditContext: AuditContext): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      const res = await txClient.query(
         `UPDATE decisions
          SET status = 'REJECTED', decided_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
          WHERE decision_id = $1 AND status IN ('PROPOSED', 'REOPENED')
          RETURNING *;`,
         [decisionId]
       );
-      if (res.rows.length > 0) {
-        return mapRowToDecision(res.rows[0]);
+
+      if (res.rows.length === 0) {
+        const current = await this.getDecision(decisionId, txClient);
+        throw new InvalidStateTransitionError(
+          `Invalid state transition: Cannot reject decision in '${current.status}' state`
+        );
       }
+
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_REJECTED',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
+      await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError(`Failed to reject decision '${decisionId}'`, err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
-
-    const current = await this.getDecision(decisionId);
-    throw new InvalidStateTransitionError(
-      `Invalid state transition: Cannot reject decision in '${current.status}' state`
-    );
   }
 
-  async reopenDecision(decisionId: string, reopenCondition?: string | null): Promise<Decision> {
+  async reopenDecision(
+    decisionId: string,
+    reopenCondition: string | null | undefined,
+    auditContext: AuditContext
+  ): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
+
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      const res = await txClient.query(
         `UPDATE decisions
          SET status = 'REOPENED', reopen_condition = $2, updated_at = CURRENT_TIMESTAMP
          WHERE decision_id = $1 AND status = 'FROZEN'
          RETURNING *;`,
         [decisionId, reopenCondition ? reopenCondition.trim() : null]
       );
-      if (res.rows.length > 0) {
-        return mapRowToDecision(res.rows[0]);
+
+      if (res.rows.length === 0) {
+        const current = await this.getDecision(decisionId, txClient);
+        throw new InvalidStateTransitionError(
+          `Invalid state transition: Cannot reopen decision in '${current.status}' state`
+        );
       }
+
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_REOPENED',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
+      await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError(`Failed to reopen decision '${decisionId}'`, err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
-
-    const current = await this.getDecision(decisionId);
-    throw new InvalidStateTransitionError(
-      `Invalid state transition: Cannot reopen decision in '${current.status}' state`
-    );
   }
 
   async updateDecisionContent(
     decisionId: string,
-    content: UpdateDecisionContentInput
+    content: UpdateDecisionContentInput,
+    auditContext: AuditContext
   ): Promise<Decision> {
     if (!decisionId || decisionId.trim() === '') {
       throw new InvalidInputError('decision_id is required');
     }
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
+    }
 
-    const current = await this.getDecision(decisionId);
-
-    const newTopic = content.topic !== undefined ? content.topic.trim() : current.topic;
-    const newDecision = content.decision !== undefined ? content.decision.trim() : current.decision;
-    const newReason = content.reason !== undefined ? (content.reason ? content.reason.trim() : null) : current.reason;
-    const newAuthority = content.authority !== undefined ? content.authority.trim() : current.authority;
-    const newAlt = content.alternativesConsidered !== undefined
-      ? (content.alternativesConsidered ? JSON.stringify(content.alternativesConsidered) : null)
-      : (current.alternativesConsidered ? JSON.stringify(current.alternativesConsidered) : null);
-
-    if (!newTopic) throw new InvalidInputError('topic cannot be empty');
-    if (!newDecision) throw new InvalidInputError('decision cannot be empty');
-    if (!newAuthority) throw new InvalidInputError('authority cannot be empty');
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      const res = await this.client.query(
+      await txClient.query('BEGIN;');
+
+      const current = await this.getDecision(decisionId, txClient);
+
+      const newTopic = content.topic !== undefined ? content.topic.trim() : current.topic;
+      const newDecision = content.decision !== undefined ? content.decision.trim() : current.decision;
+      const newReason = content.reason !== undefined ? (content.reason ? content.reason.trim() : null) : current.reason;
+      const newAuthority = content.authority !== undefined ? content.authority.trim() : current.authority;
+      const newAlt = content.alternativesConsidered !== undefined
+        ? (content.alternativesConsidered ? JSON.stringify(content.alternativesConsidered) : null)
+        : (current.alternativesConsidered ? JSON.stringify(current.alternativesConsidered) : null);
+
+      if (!newTopic) throw new InvalidInputError('topic cannot be empty');
+      if (!newDecision) throw new InvalidInputError('decision cannot be empty');
+      if (!newAuthority) throw new InvalidInputError('authority cannot be empty');
+
+      const res = await txClient.query(
         `UPDATE decisions
          SET topic = $2, decision = $3, reason = $4, alternatives_considered = $5, authority = $6, updated_at = CURRENT_TIMESTAMP
          WHERE decision_id = $1 AND status IN ('PROPOSED', 'REOPENED')
          RETURNING *;`,
         [decisionId, newTopic, newDecision, newReason, newAlt, newAuthority]
       );
-      if (res.rows.length > 0) {
-        return mapRowToDecision(res.rows[0]);
+
+      if (res.rows.length === 0) {
+        const latest = await this.getDecision(decisionId, txClient);
+        if (latest.status === 'FROZEN') {
+          throw new FrozenDecisionMutationError(
+            `Frozen decision mutation denied: Decision '${decisionId}' is FROZEN and cannot be modified directly`
+          );
+        }
+        throw new InvalidStateTransitionError(
+          `Cannot update content of decision in '${latest.status}' state`
+        );
       }
+
+      const decision = mapRowToDecision(res.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: decision.projectId,
+          sessionId: decision.sessionId,
+          decisionId: decision.decisionId,
+          action: 'DECISION_CONTENT_UPDATED',
+          result: 'SUCCESS'
+        },
+        txClient
+      );
+
+      await txClient.query('COMMIT;');
+      return decision;
     } catch (err: unknown) {
+      await txClient.query('ROLLBACK;').catch(() => {});
       if (err instanceof DomainError) throw err;
       throw new DatabaseFailureError(`Failed to update decision content for '${decisionId}'`, err);
+    } finally {
+      if (shouldRelease && 'release' in txClient) {
+        (txClient as pg.PoolClient).release();
+      }
     }
-
-    const latest = await this.getDecision(decisionId);
-    if (latest.status === 'FROZEN') {
-      throw new FrozenDecisionMutationError(
-        `Frozen decision mutation denied: Decision '${decisionId}' is FROZEN and cannot be modified directly`
-      );
-    }
-    throw new InvalidStateTransitionError(
-      `Cannot update content of decision in '${latest.status}' state`
-    );
   }
 
   async supersedeDecision(
-    input: SupersedeDecisionInput
+    input: SupersedeDecisionInput,
+    auditContext: AuditContext
   ): Promise<{ predecessor: Decision; successor: Decision }> {
     if (!input || !input.predecessorDecisionId || input.predecessorDecisionId.trim() === '') {
       throw new InvalidInputError('predecessorDecisionId is required');
     }
-
-    const isPool = 'totalCount' in this.client || 'idleCount' in this.client;
-    let txClient: pg.ClientBase;
-    let shouldRelease = false;
-
-    if (isPool) {
-      txClient = await (this.client as pg.Pool).connect();
-      shouldRelease = true;
-    } else {
-      txClient = this.client as pg.Client;
+    if (!auditContext) {
+      throw new InvalidInputError('AuditContext is required for audited write operation');
     }
+
+    const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
       await txClient.query('BEGIN;');
@@ -397,6 +577,19 @@ export class DecisionManager {
       }
 
       const updatedPredecessor = mapRowToDecision(predRes.rows[0]);
+
+      await this.auditRecorder.recordAuditEvent(
+        {
+          ...auditContext,
+          projectId: successor.projectId,
+          sessionId: successor.sessionId,
+          decisionId: successor.decisionId,
+          action: 'DECISION_SUPERSEDED',
+          authorityReference: predecessor.decisionId,
+          result: 'SUCCESS'
+        },
+        txClient
+      );
 
       await txClient.query('COMMIT;');
 
