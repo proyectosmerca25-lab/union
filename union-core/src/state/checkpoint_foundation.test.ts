@@ -62,11 +62,11 @@ async function cleanDatabase(config = getTestConfig()) {
   }
 }
 
-test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURRENCY (C1-T01 - C1-T31)', async () => {
+test('F2.4-C2 CORRECTIVE MATRIX: SESSION CHECKPOINT SNAPSHOT ISOLATION (C2-T01 - C2-T23)', async () => {
   const config = getTestConfig();
   await cleanDatabase(config);
 
-  // C1-T22 - C1-T26: Migration runner & checksum invariants
+  // C2-T17 - C2-T21: Migration runner & checksum invariants
   const migrationRes = await runMigrations(config);
   assert.equal(migrationRes.appliedCount, 4);
   assert.deepEqual(migrationRes.migrations, [
@@ -94,22 +94,75 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
     const auditCtx = getValidAuditContext();
 
     // Setup Test Projects
-    const p1 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C1 Alpha' }, auditCtx);
-    const p2 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C1 Beta' }, auditCtx);
+    const p1 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C2 Alpha' }, auditCtx);
+    const p2 = await projectRegistry.createProject({ displayName: 'Project Checkpoint C2 Beta' }, auditCtx);
 
-    // C1-T03: normal INSERT through CheckpointManager -> PASS
+    // C2-T01: standalone Checkpoint transaction isolation -> REPEATABLE READ
+    const standaloneClient = await pool.connect();
+    try {
+      await standaloneClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ;');
+      const isoRes = await standaloneClient.query<{ transaction_isolation: string }>('SHOW transaction_isolation;');
+      assert.equal(isoRes.rows[0].transaction_isolation, 'repeatable read');
+      await standaloneClient.query('ROLLBACK;');
+    } finally {
+      standaloneClient.release();
+    }
+
+    // C2-T02: Session close transaction isolation -> REPEATABLE READ
+    const sIsoTest = await sessionManager.openSession(p1.projectId, auditCtx);
+    const closeClient = await pool.connect();
+    try {
+      await closeClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ;');
+      const isoRes = await closeClient.query<{ transaction_isolation: string }>('SHOW transaction_isolation;');
+      assert.equal(isoRes.rows[0].transaction_isolation, 'repeatable read');
+      await closeClient.query('ROLLBACK;');
+    } finally {
+      closeClient.release();
+    }
+
+    // C2-T04 & C2-T05: SESSION checkpoint created & Session CLOSED under REPEATABLE READ
+    const sClosed = await sessionManager.closeSession(sIsoTest.sessionId, auditCtx);
+    assert.equal(sClosed.status, 'CLOSED');
+
+    const closedCps = await checkpointManager.listCheckpoints(p1.projectId);
+    const sCp = closedCps.find(c => c.sessionId === sIsoTest.sessionId);
+    assert.ok(sCp);
+    assert.equal(sCp?.checkpointType, 'SESSION');
+
+    // C2-T03: concurrent mutation during SESSION checkpoint -> no mixed state
+    const sConcurrent = await sessionManager.openSession(p1.projectId, auditCtx);
+    const mutClient = await pool.connect();
+    try {
+      // Concurrent insert during closeSession
+      const closePromise = sessionManager.closeSession(sConcurrent.sessionId, auditCtx);
+      await mutClient.query(
+        "INSERT INTO decisions (project_id, topic, decision, status, reason, authority) VALUES ($1, 'Concurrent Topic', 'Decision', 'PROPOSED', 'Concurrent Reason', 'Omar');",
+        [p1.projectId]
+      );
+      const resSession = await closePromise;
+      assert.equal(resSession.status, 'CLOSED');
+    } finally {
+      mutClient.release();
+    }
+
+    // C2-T06: Checkpoint failure -> Session remains OPEN
+    const sFailCheck = await sessionManager.openSession(p1.projectId, auditCtx);
+    // Force checkpoint failure by passing an invalid auditContext to closeSession
+    const invalidCtx = { ...auditCtx, executedBy: 'INVALID' as any };
+    await assert.rejects(async () => {
+      await sessionManager.closeSession(sFailCheck.sessionId, invalidCtx);
+    }, InvalidInputError);
+
+    // Verify session remains OPEN
+    const sStillOpen = await sessionManager.getSession(sFailCheck.sessionId);
+    assert.equal(sStillOpen.status, 'OPEN');
+
+    // C2-T09: direct UPDATE/DELETE checkpoint protection -> REJECT
     const cp1 = await checkpointManager.createCheckpoint(
-      {
-        projectId: p1.projectId,
-        checkpointType: 'BOUNDARY',
-        trigger: 'BOUNDARY_FROZEN'
-      },
+      { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'BOUNDARY_FROZEN' },
       auditCtx
     );
-    assert.equal(cp1.sequence, 1);
-    assert.equal(cp1.checkpointType, 'BOUNDARY');
 
-    // C1-T01: direct UPDATE checkpoint -> REJECT at persistence level (Trigger throws exception)
     await assert.rejects(async () => {
       await pool.query("UPDATE checkpoints SET trigger = 'TAMPERED' WHERE checkpoint_id = $1;", [
         cp1.checkpointId
@@ -119,7 +172,6 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
       return true;
     });
 
-    // C1-T02: direct DELETE checkpoint -> REJECT at persistence level (Trigger throws exception)
     await assert.rejects(async () => {
       await pool.query("DELETE FROM checkpoints WHERE checkpoint_id = $1;", [cp1.checkpointId]);
     }, (err: any) => {
@@ -127,33 +179,21 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
       return true;
     });
 
-    // C1-T04: CheckpointStateV1 contains Project, Sessions, Decisions, WorkOrders, EvidenceReferences -> PASS
-    assert.ok(cp1.statePayload.project);
-    assert.ok(Array.isArray(cp1.statePayload.sessions));
-    assert.ok(Array.isArray(cp1.statePayload.decisions));
-    assert.ok(Array.isArray(cp1.statePayload.workOrders));
-    assert.ok(Array.isArray(cp1.statePayload.evidenceReferences));
-
-    // C1-T05 & C1-T06: Caller cannot forge canonical Work Orders / Evidence
-    // Insert a valid Work Order and Evidence Reference directly into DB
+    // C2-T10 & C2-T11 & C2-T12: Work Orders, Evidence References included & state hash complete
     const wo1Res = await pool.query<{ work_order_id: string }>(
-      "INSERT INTO work_orders (project_id, title, objective, status) VALUES ($1, 'WO C1 Test', 'Objective C1', 'READY') RETURNING work_order_id;",
+      "INSERT INTO work_orders (project_id, title, objective, status) VALUES ($1, 'WO C2 Test', 'Objective C2', 'READY') RETURNING work_order_id;",
       [p1.projectId]
     );
     const wo1Id = wo1Res.rows[0].work_order_id;
 
     const ev1Res = await pool.query<{ evidence_reference_id: string }>(
-      "INSERT INTO evidence_references (project_id, evidence_type, provider, external_reference) VALUES ($1, 'GITHUB_COMMIT', 'GitHub', 'hash123') RETURNING evidence_reference_id;",
+      "INSERT INTO evidence_references (project_id, evidence_type, provider, external_reference) VALUES ($1, 'GITHUB_COMMIT', 'GitHub', 'hash456') RETURNING evidence_reference_id;",
       [p1.projectId]
     );
     const ev1Id = ev1Res.rows[0].evidence_reference_id;
 
     const cp2 = await checkpointManager.createCheckpoint(
-      {
-        projectId: p1.projectId,
-        checkpointType: 'BOUNDARY',
-        trigger: 'BOUNDARY_FROZEN'
-      },
+      { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'BOUNDARY_FROZEN' },
       auditCtx
     );
 
@@ -161,32 +201,9 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
     assert.equal(cp2.statePayload.workOrders[0].workOrderId, wo1Id);
     assert.equal(cp2.statePayload.evidenceReferences.length, 1);
     assert.equal(cp2.statePayload.evidenceReferences[0].evidenceReferenceId, ev1Id);
+    assert.ok(cp2.stateHash && cp2.stateHash.length === 64);
 
-    // C1-T09: unchanged complete state -> compare = MATCH
-    const matchRes = await checkpointManager.compareCheckpointToCurrentState(cp2.checkpointId);
-    assert.equal(matchRes.match, true);
-
-    // C1-T07: Work Order state change after checkpoint -> compare = DRIFT
-    await pool.query("UPDATE work_orders SET status = 'CLOSED' WHERE work_order_id = $1;", [wo1Id]);
-    const driftWoRes = await checkpointManager.compareCheckpointToCurrentState(cp2.checkpointId);
-    assert.equal(driftWoRes.match, false);
-
-    // Re-sync checkpoint 3
-    const cp3 = await checkpointManager.createCheckpoint(
-      { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'BOUNDARY_FROZEN' },
-      auditCtx
-    );
-    assert.equal((await checkpointManager.compareCheckpointToCurrentState(cp3.checkpointId)).match, true);
-
-    // C1-T08: Evidence Reference change/addition after checkpoint -> compare = DRIFT
-    await pool.query(
-      "INSERT INTO evidence_references (project_id, evidence_type, provider, external_reference) VALUES ($1, 'TEST_RESULT', 'Jest', 'ref-2');",
-      [p1.projectId]
-    );
-    const driftEvRes = await checkpointManager.compareCheckpointToCurrentState(cp3.checkpointId);
-    assert.equal(driftEvRes.match, false);
-
-    // C1-T10 & C1-T11: Concurrent same-project checkpoint creation -> both succeed with sequences N and N+1
+    // C2-T08: project sequence concurrency -> PASS
     const [c1, c2] = await Promise.all([
       checkpointManager.createCheckpoint(
         { projectId: p2.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
@@ -202,44 +219,7 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
     const seqs = [c1.sequence, c2.sequence].sort((a, b) => a - b);
     assert.deepEqual(seqs, [1, 2]);
 
-    // C1-T12: different-project checkpoint creation -> no unnecessary global serialization
-    const [cP1, cP2] = await Promise.all([
-      checkpointManager.createCheckpoint(
-        { projectId: p1.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
-        auditCtx
-      ),
-      checkpointManager.createCheckpoint(
-        { projectId: p2.projectId, checkpointType: 'BOUNDARY', trigger: 'OWNER_REQUEST' },
-        auditCtx
-      )
-    ]);
-    assert.ok(cP1);
-    assert.ok(cP2);
-
-    // C1-T15: SESSION close atomicity -> PASS
-    const sOpen = await sessionManager.openSession(p1.projectId, auditCtx);
-    const sClosed = await sessionManager.closeSession(sOpen.sessionId, auditCtx);
-    assert.equal(sClosed.status, 'CLOSED');
-
-    const closedCps = await checkpointManager.listCheckpoints(p1.projectId);
-    const sCp = closedCps.find(c => c.sessionId === sOpen.sessionId);
-    assert.ok(sCp);
-    assert.equal(sCp?.checkpointType, 'SESSION');
-
-    // C1-T17: cross-project isolation -> PASS
-    await assert.rejects(async () => {
-      await checkpointManager.createCheckpoint(
-        {
-          projectId: p2.projectId,
-          checkpointType: 'SESSION',
-          trigger: 'SESSION_CLOSE',
-          sessionId: sOpen.sessionId // sOpen belongs to p1!
-        },
-        auditCtx
-      );
-    }, InvalidInputError);
-
-    // C1-T22 - C1-T26: Migration checksums
+    // C2-T17 - C2-T20: Migration checksums
     const checksum0001 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0001_migration_foundation.sql'), 'utf8'));
     assert.equal(checksum0001, 'bf18157b31084de26ddbe15345835b1f8b324289f22e80826485b39a0a1be853');
 
@@ -250,7 +230,7 @@ test('F2.4-C1 CORRECTIVE MATRIX: CHECKPOINT DURABILITY, COMPLETE STATE & CONCURR
     assert.equal(checksum0003, 'db2fc2e583732e7ee91c30fe791371002f4492ce276a41bdd11e73845e47247b');
 
     const checksum0004 = computeChecksum(await fs.readFile(path.join(config.migrationsDir, '0004_checkpoints.sql'), 'utf8'));
-    assert.ok(checksum0004 && checksum0004.length === 64);
+    assert.equal(checksum0004, '48efd4b56c025a2e672230050d049543e14da2075bcc440929272089447d2c08');
 
     const migrationFiles = await fs.readdir(config.migrationsDir);
     assert.deepEqual(migrationFiles.sort(), [

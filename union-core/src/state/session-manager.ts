@@ -154,7 +154,7 @@ export class SessionManager {
     const { txClient, shouldRelease } = await this.getTxClient();
 
     try {
-      await txClient.query('BEGIN;');
+      await txClient.query('BEGIN ISOLATION LEVEL REPEATABLE READ;');
 
       const session = await this.getSession(sessionId, txClient);
       if (session.status === 'CLOSED') {
